@@ -17,6 +17,9 @@ namespace
         float stop_thresh;
         FieldType type;
         void* device_ctx;
+        const float* d_origins;
+        const float* d_dirs;
+        const float* d_tmin;
     };
 
     struct GridDenseDev
@@ -26,14 +29,9 @@ namespace
         float bmax[3];
         float* sigma;
         float* rgb;
+        float* g_sigma;
+        float* g_rgb;
     };
-
-    __device__ inline void ray_at3(const float* o, const float* d, float t, float* p)
-    {
-        p[0] = o[0] + t * d[0];
-        p[1] = o[1] + t * d[1];
-        p[2] = o[2] + t * d[2];
-    }
 
     __device__ inline float clampf(float x, float a, float b) { return x < a ? a : (x > b ? b : x); }
     __device__ inline float lerp(float a, float b, float t) { return a + (b - a) * t; }
@@ -62,17 +60,18 @@ namespace
         float r001 = g->rgb[i001 * 3 + 0], r101 = g->rgb[i101 * 3 + 0], r011 = g->rgb[i011 * 3 + 0], r111 = g->rgb[i111 * 3 + 0];
         float r00 = lerp(r000, r100, tx), r10 = lerp(r010, r110, tx), r01 = lerp(r001, r101, tx), r11 = lerp(r011, r111, tx);
         float r0 = lerp(r00, r10, ty), r1 = lerp(r01, r11, ty);
-        rgb[0] = lerp(r0, r1, tz);
+        float rc = lerp(r0, r1, tz);
         float g000 = g->rgb[i000 * 3 + 1], g100 = g->rgb[i100 * 3 + 1], g010 = g->rgb[i010 * 3 + 1], g110 = g->rgb[i110 * 3 + 1];
         float g001 = g->rgb[i001 * 3 + 1], g101 = g->rgb[i101 * 3 + 1], g011 = g->rgb[i011 * 3 + 1], g111 = g->rgb[i111 * 3 + 1];
         float g00 = lerp(g000, g100, tx), g10 = lerp(g010, g110, tx), g01 = lerp(g001, g101, tx), g11 = lerp(g011, g111, tx);
-        float g0 = lerp(g00, g10, ty), g1 = lerp(g01, g11, ty);
-        rgb[1] = lerp(g0, g1, tz);
+        float gc = lerp(lerp(g00, g10, ty), lerp(g01, g11, ty), tz);
         float b000 = g->rgb[i000 * 3 + 2], b100 = g->rgb[i100 * 3 + 2], b010 = g->rgb[i010 * 3 + 2], b110 = g->rgb[i110 * 3 + 2];
         float b001 = g->rgb[i001 * 3 + 2], b101 = g->rgb[i101 * 3 + 2], b011 = g->rgb[i011 * 3 + 2], b111 = g->rgb[i111 * 3 + 2];
         float b00 = lerp(b000, b100, tx), b10 = lerp(b010, b110, tx), b01 = lerp(b001, b101, tx), b11 = lerp(b011, b111, tx);
-        float b0 = lerp(b00, b10, ty), b1 = lerp(b01, b11, ty);
-        rgb[2] = lerp(b0, b1, tz);
+        float bc = lerp(lerp(b00, b10, ty), lerp(b01, b11, ty), tz);
+        rgb[0] = rc;
+        rgb[1] = gc;
+        rgb[2] = bc;
     }
 
     __global__ void k_forward_grid_dense(const float* origins, const float* dirs, const float* tmin, int n_steps, float dt, int W, int H, float sigma_scale, float stop_thresh, float* out_rgb, const GridDenseDev* g)
@@ -89,8 +88,7 @@ namespace
         for (int i = 0; i < n_steps; ++i)
         {
             float t = t0 + dt * i;
-            float p[3];
-            ray_at3(o, d, t, p);
+            float p[3] = {o[0] + t * d[0], o[1] + t * d[1], o[2] + t * d[2]};
             float sig;
             float col[3];
             grid_trilinear(g, p, sig, col);
@@ -112,13 +110,20 @@ bool dvren::volume_forward(const RaysSOA& rays, const SamplingSpec& spec, const 
 {
     int W = rays.width, H = rays.height, n = W * H;
     float* d_img = nullptr;
+    float *d_o = nullptr, *d_d = nullptr, *d_tmin = nullptr;
     cudaMalloc(&d_img, sizeof(float) * n * 3);
+    cudaMalloc(&d_o, sizeof(float) * n * 3);
+    cudaMalloc(&d_d, sizeof(float) * n * 3);
+    cudaMalloc(&d_tmin, sizeof(float) * n);
+    cudaMemcpy(d_o, rays.origins, sizeof(float) * n * 3, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_d, rays.dirs, sizeof(float) * n * 3, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_tmin, rays.tmin, sizeof(float) * n, cudaMemcpyHostToDevice);
     dim3 bs(16, 16, 1);
     dim3 gs((W + bs.x - 1) / bs.x, (H + bs.y - 1) / bs.y, 1);
     if (field.type == Field_Grid_Dense)
     {
         auto g = reinterpret_cast<const GridDenseDev*>(field.device_ctx);
-        k_forward_grid_dense<<<gs,bs>>>(rays.origins, rays.dirs, rays.tmin, spec.n_steps, spec.dt, W, H, spec.sigma_scale, spec.stop_thresh, d_img, g);
+        k_forward_grid_dense<<<gs,bs>>>(d_o, d_d, d_tmin, spec.n_steps, spec.dt, W, H, spec.sigma_scale, spec.stop_thresh, d_img, g);
     }
     else
     {
@@ -127,7 +132,6 @@ bool dvren::volume_forward(const RaysSOA& rays, const SamplingSpec& spec, const 
     cudaDeviceSynchronize();
     out.image.resize(n * 3);
     cudaMemcpy(out.image.data(), d_img, sizeof(float) * n * 3, cudaMemcpyDeviceToHost);
-    cudaFree(d_img);
     HostCtx hctx{};
     hctx.width = W;
     hctx.height = H;
@@ -137,10 +141,14 @@ bool dvren::volume_forward(const RaysSOA& rays, const SamplingSpec& spec, const 
     hctx.stop_thresh = spec.stop_thresh;
     hctx.type = field.type;
     hctx.device_ctx = field.device_ctx;
+    hctx.d_origins = d_o;
+    hctx.d_dirs = d_d;
+    hctx.d_tmin = d_tmin;
     void* d_ctx = nullptr;
     cudaMalloc(&d_ctx, sizeof(HostCtx));
     cudaMemcpy(d_ctx, &hctx, sizeof(HostCtx), cudaMemcpyHostToDevice);
     out.saved_ctx = d_ctx;
     out.saved_ctx_bytes = sizeof(HostCtx);
+    cudaFree(d_img);
     return true;
 }

@@ -23,7 +23,7 @@ set(DVREN_CORE_SOURCES
         src/adapters/field_grid.cu
 )
 
-add_executable(dvren main.cpp ${DVREN_CORE_SOURCES})
+add_executable(dvren test/test_grad.cpp ${DVREN_CORE_SOURCES})
 target_include_directories(dvren PRIVATE include)
 include(cmake/setup_vdb.cmake)
 use_vdb(dvren)

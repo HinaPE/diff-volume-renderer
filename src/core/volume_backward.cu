@@ -1,6 +1,7 @@
 #include <cuda_runtime.h>
 #include <cmath>
 #include <vector>
+#include <cstring>
 #include "dvren.h"
 
 using namespace dvren;
@@ -17,6 +18,9 @@ namespace
         float stop_thresh;
         FieldType type;
         void* device_ctx;
+        const float* d_origins;
+        const float* d_dirs;
+        const float* d_tmin;
     };
 
     struct GridDenseDev
@@ -31,7 +35,6 @@ namespace
     };
 
     __device__ inline float clampf(float x, float a, float b) { return x < a ? a : (x > b ? b : x); }
-    __device__ inline float lerp(float a, float b, float t) { return a + (b - a) * t; }
 
     __device__ inline void grid_weights(const GridDenseDev* g, const float* p, int idxs[8], float w[8])
     {
@@ -67,7 +70,7 @@ namespace
         w[7] = wx1 * wy1 * wz1;
     }
 
-    __device__ inline void sample_grid(const GridDenseDev* g, const float* p, float& sig, float col[3])
+    __device__ inline void sample_sigma_rgb(const GridDenseDev* g, const float* p, float& sig, float col[3])
     {
         int idxs[8];
         float w[8];
@@ -91,51 +94,66 @@ namespace
     __global__ void k_backward_grid_dense(
         const float* origins, const float* dirs, const float* tmin,
         int W, int H, int n_steps, float dt, float ksig, float stop_thresh,
-        const float* dL_dimg, const GridDenseDev* g)
+        const float* dL_dimg, GridDenseDev* g)
     {
         int x = blockIdx.x * blockDim.x + threadIdx.x;
         int y = blockIdx.y * blockDim.y + threadIdx.y;
         if (x >= W || y >= H) return;
         int pix = y * W + x;
-        float3 gC = make_float3(dL_dimg[pix * 3 + 0], dL_dimg[pix * 3 + 1], dL_dimg[pix * 3 + 2]);
         const float* o = origins + pix * 3;
         const float* d = dirs + pix * 3;
         float t0 = tmin[pix];
-        float T = 1.f;
+        float3 gC = make_float3(dL_dimg[pix * 3 + 0], dL_dimg[pix * 3 + 1], dL_dimg[pix * 3 + 2]);
         const int S = 1024;
-        float a_buf[1024];
-        float v_buf[1024];
         int steps = n_steps;
         if (steps > S) steps = S;
+        float a_buf[S];
+        float T_buf[S];
+        int used = 0;
+        float T = 1.f;
         for (int i = 0; i < steps; ++i)
         {
             float t = t0 + dt * i;
             float p[3] = {o[0] + t * d[0], o[1] + t * d[1], o[2] + t * d[2]};
             float sig;
             float col[3];
-            sample_grid(g, p, sig, col);
+            sample_sigma_rgb(g, p, sig, col);
             float a = 1.f - expf(-ksig * sig * dt);
-            float w = T * a;
-            float v = gC.x * col[0] + gC.y * col[1] + gC.z * col[2];
             a_buf[i] = a;
-            v_buf[i] = v;
+            T_buf[i] = T;
             T *= 1.f - a;
-            if (T < stop_thresh)
-            {
-                steps = i + 1;
-                break;
-            }
+            used = i + 1;
+            if (T < stop_thresh) break;
         }
         float dT_next = 0.f;
-        for (int i = steps - 1; i >= 0; --i)
+        for (int i = used - 1; i >= 0; --i)
         {
+            float T_i = T_buf[i];
             float a = a_buf[i];
-            float dL_dTi = v_buf[i] + dT_next * (1.f - a);
-            float dL_dai = (gC.x + 0.f) * (0.f) + (gC.y + 0.f) * (0.f) + (gC.z + 0.f) * (0.f);
-            dL_dai += dT_next * (-T);
-            float T_i = 1.f;
-            for (int j = 0; j < i; ++j) { T_i *= 1.f - a_buf[j]; }
-            dL_dai += T_i * (gC.x * 0.f + gC.y * 0.f + gC.z * 0.f);
+            float t = t0 + dt * i;
+            float p[3] = {o[0] + t * d[0], o[1] + t * d[1], o[2] + t * d[2]};
+            float sig;
+            float col[3];
+            sample_sigma_rgb(g, p, sig, col);
+            float w_i = T_i * a;
+            float3 dL_dc = make_float3(gC.x * w_i, gC.y * w_i, gC.z * w_i);
+            float dL_dw = gC.x * col[0] + gC.y * col[1] + gC.z * col[2];
+            float dL_dTi = dL_dw * a + dT_next * (1.f - a);
+            float dL_dai = dL_dw * T_i + dT_next * (-T_i);
+            float dai_dsigma = ksig * dt * (1.f - a);
+            float dL_dsigma = dL_dai * dai_dsigma;
+            int idxs[8];
+            float ww[8];
+            grid_weights(g, p, idxs, ww);
+            for (int k = 0; k < 8; ++k)
+            {
+                int vi = idxs[k];
+                float wk = ww[k];
+                atomicAdd(&g->g_sigma[vi], dL_dsigma * wk);
+                atomicAdd(&g->g_rgb[vi * 3 + 0], dL_dc.x * wk);
+                atomicAdd(&g->g_rgb[vi * 3 + 1], dL_dc.y * wk);
+                atomicAdd(&g->g_rgb[vi * 3 + 2], dL_dc.z * wk);
+            }
             dT_next = dL_dTi;
         }
     }
@@ -146,19 +164,22 @@ bool dvren::volume_backward(void* saved_ctx, size_t saved_ctx_bytes, const float
     if (field.type != Field_Grid_Dense) return false;
     HostCtx h{};
     cudaMemcpy(&h, saved_ctx, sizeof(HostCtx), cudaMemcpyDeviceToHost);
-    int W = h.width, H = h.height;
-    GridDenseDev g;
-    cudaMemcpy(&g, field.device_ctx, sizeof(GridDenseDev), cudaMemcpyDeviceToHost);
-    if (!g.g_sigma || !g.g_rgb)
-    {
-        cudaMemset(field.device_ctx, 0, 0);
-    }
+    if (h.width != width || h.height != height) return false;
+    auto g_dev = reinterpret_cast<GridDenseDev*>(field.device_ctx);
+    GridDenseDev g_host{};
+    cudaMemcpy(&g_host, g_dev, sizeof(GridDenseDev), cudaMemcpyDeviceToHost);
+    if (!g_host.g_sigma || !g_host.g_rgb) return false;
+    float* d_grad = nullptr;
+    size_t n = static_cast<size_t>(width) * height * 3;
+    cudaMalloc(&d_grad, sizeof(float) * n);
+    cudaMemcpy(d_grad, dL_dimage, sizeof(float) * n, cudaMemcpyHostToDevice);
     dim3 bs(16, 16, 1);
-    dim3 gs((W + bs.x - 1) / bs.x, (H + bs.y - 1) / bs.y, 1);
+    dim3 gs((width + bs.x - 1) / bs.x, (height + bs.y - 1) / bs.y, 1);
     k_backward_grid_dense<<<gs,bs>>>(
-        nullptr, nullptr, nullptr,
-        W, H, h.n_steps, h.dt, h.sigma_scale, h.stop_thresh,
-        dL_dimage, reinterpret_cast<const GridDenseDev*>(field.device_ctx));
+        h.d_origins, h.d_dirs, h.d_tmin,
+        width, height, h.n_steps, h.dt, h.sigma_scale, h.stop_thresh,
+        d_grad, g_dev);
     cudaDeviceSynchronize();
+    cudaFree(d_grad);
     return true;
 }
