@@ -20,6 +20,7 @@ set(DVREN_CORE_SOURCES
         src/core/volume_backward.cu
         src/core/ctx_store.cu
         src/core/compositor.cu
+        src/adapters/field_grid.cu
 )
 
 add_executable(dvren main.cpp ${DVREN_CORE_SOURCES})
