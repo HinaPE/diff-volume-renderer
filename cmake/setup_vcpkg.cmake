@@ -1,0 +1,28 @@
+if(NOT WIN32)
+    message(FATAL_ERROR "Windows only")
+endif()
+
+set(_vcpkg_root "${CMAKE_BINARY_DIR}/_vcpkg")
+set(_vcpkg_zip "${CMAKE_BINARY_DIR}/_vcpkg.zip")
+
+if(NOT EXISTS "${_vcpkg_root}")
+    file(DOWNLOAD "https://github.com/microsoft/vcpkg/archive/refs/heads/master.zip" "${_vcpkg_zip}" SHOW_PROGRESS TLS_VERIFY ON)
+    execute_process(COMMAND ${CMAKE_COMMAND} -E tar xvf "${_vcpkg_zip}" WORKING_DIRECTORY "${CMAKE_BINARY_DIR}")
+    file(GLOB _unzipped "${CMAKE_BINARY_DIR}/vcpkg-*")
+    list(LENGTH _unzipped _n)
+    if(_n EQUAL 0)
+        message(FATAL_ERROR "vcpkg archive unzip failed")
+    endif()
+    list(GET _unzipped 0 _unz_dir)
+    file(RENAME "${_unz_dir}" "${_vcpkg_root}")
+endif()
+
+if(NOT EXISTS "${_vcpkg_root}/vcpkg.exe")
+    execute_process(COMMAND "${_vcpkg_root}/bootstrap-vcpkg.bat" WORKING_DIRECTORY "${_vcpkg_root}")
+endif()
+
+set(CMAKE_TOOLCHAIN_FILE "${_vcpkg_root}/scripts/buildsystems/vcpkg.cmake" CACHE FILEPATH "")
+set(VCPKG_FEATURE_FLAGS "manifests;binarycaching" CACHE STRING "")
+set(VCPKG_TARGET_TRIPLET "x64-windows" CACHE STRING "")
+set(VCPKG_BUILD_TYPE "release" CACHE STRING "")
+set(VCPKG_DEFAULT_BINARY_CACHE "${CMAKE_BINARY_DIR}/_vcpkg_cache" CACHE PATH "")
