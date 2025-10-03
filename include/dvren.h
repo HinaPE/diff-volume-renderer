@@ -1,5 +1,4 @@
-#ifndef DIFFVOLUMERENDERER_DVREN_H
-#define DIFFVOLUMERENDERER_DVREN_H
+#pragma once
 #include <cstdint>
 #include <vector>
 
@@ -63,5 +62,6 @@ namespace dvren
 
     bool field_grid_dense_create(const GridDenseDesc& desc, FieldProvider& out);
     void field_grid_dense_destroy(FieldProvider& fp);
+    void field_grid_dense_zero_grad(FieldProvider& fp);
+    bool field_grid_dense_download_grad(const FieldProvider& fp, std::vector<float>& sigma_g, std::vector<float>& rgb_g);
 }
-#endif //DIFFVOLUMERENDERER_DVREN_H
