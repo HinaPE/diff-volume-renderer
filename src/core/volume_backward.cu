@@ -104,13 +104,13 @@ namespace
         const float* d = dirs + pix * 3;
         float t0 = tmin[pix];
         float3 gC = make_float3(dL_dimg[pix * 3 + 0], dL_dimg[pix * 3 + 1], dL_dimg[pix * 3 + 2]);
-        const int S = 1024;
+        const int S = 2048;
         int steps = n_steps;
         if (steps > S) steps = S;
         float a_buf[S];
         float T_buf[S];
         int used = 0;
-        float T = 1.f;
+        double T = 1.0;
         for (int i = 0; i < steps; ++i)
         {
             float t = t0 + dt * i;
@@ -118,41 +118,40 @@ namespace
             float sig;
             float col[3];
             sample_sigma_rgb(g, p, sig, col);
-            float a = 1.f - expf(-ksig * sig * dt);
-            a_buf[i] = a;
-            T_buf[i] = T;
-            T *= 1.f - a;
+            double a = 1.0 - exp(-(double)ksig * (double)sig * (double)dt);
+            a_buf[i] = (float)a;
+            T_buf[i] = (float)T;
+            T *= 1.0 - a;
             used = i + 1;
-            if (T < stop_thresh) break;
+            if (T < (double)stop_thresh) break;
         }
-        float dT_next = 0.f;
+        double dT_next = 0.0;
         for (int i = used - 1; i >= 0; --i)
         {
-            float T_i = T_buf[i];
-            float a = a_buf[i];
+            double T_i = (double)T_buf[i];
+            double a = (double)a_buf[i];
             float t = t0 + dt * i;
             float p[3] = {o[0] + t * d[0], o[1] + t * d[1], o[2] + t * d[2]};
             float sig;
             float col[3];
             sample_sigma_rgb(g, p, sig, col);
-            float w_i = T_i * a;
-            float3 dL_dc = make_float3(gC.x * w_i, gC.y * w_i, gC.z * w_i);
-            float dL_dw = gC.x * col[0] + gC.y * col[1] + gC.z * col[2];
-            float dL_dTi = dL_dw * a + dT_next * (1.f - a);
-            float dL_dai = dL_dw * T_i + dT_next * (-T_i);
-            float dai_dsigma = ksig * dt * (1.f - a);
-            float dL_dsigma = dL_dai * dai_dsigma;
+            double w_i = T_i * a;
+            double vdot = (double)gC.x * col[0] + (double)gC.y * col[1] + (double)gC.z * col[2];
+            double dL_dTi = vdot * a + dT_next * (1.0 - a);
+            double dL_dai = vdot * T_i + dT_next * (-T_i);
+            double dai_dsigma = (double)ksig * (double)dt * (1.0 - a);
+            double dL_dsigma = dL_dai * dai_dsigma;
             int idxs[8];
             float ww[8];
             grid_weights(g, p, idxs, ww);
             for (int k = 0; k < 8; ++k)
             {
                 int vi = idxs[k];
-                float wk = ww[k];
-                atomicAdd(&g->g_sigma[vi], dL_dsigma * wk);
-                atomicAdd(&g->g_rgb[vi * 3 + 0], dL_dc.x * wk);
-                atomicAdd(&g->g_rgb[vi * 3 + 1], dL_dc.y * wk);
-                atomicAdd(&g->g_rgb[vi * 3 + 2], dL_dc.z * wk);
+                double wk = (double)ww[k];
+                atomicAdd(&g->g_sigma[vi], (float)(dL_dsigma * wk));
+                atomicAdd(&g->g_rgb[vi * 3 + 0], (float)((double)gC.x * w_i * wk));
+                atomicAdd(&g->g_rgb[vi * 3 + 1], (float)((double)gC.y * w_i * wk));
+                atomicAdd(&g->g_rgb[vi * 3 + 2], (float)((double)gC.z * w_i * wk));
             }
             dT_next = dL_dTi;
         }

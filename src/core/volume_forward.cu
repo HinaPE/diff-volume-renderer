@@ -83,8 +83,8 @@ namespace
         const float* o = origins + idx * 3;
         const float* d = dirs + idx * 3;
         float t0 = tmin[idx];
-        float T = 1.f;
-        float3 C = make_float3(0, 0, 0);
+        double T = 1.0;
+        double Cr = 0.0, Cg = 0.0, Cb = 0.0;
         for (int i = 0; i < n_steps; ++i)
         {
             float t = t0 + dt * i;
@@ -92,17 +92,17 @@ namespace
             float sig;
             float col[3];
             grid_trilinear(g, p, sig, col);
-            float a = 1.f - expf(-sigma_scale * sig * dt);
-            float w = T * a;
-            C.x += w * col[0];
-            C.y += w * col[1];
-            C.z += w * col[2];
-            T *= 1.f - a;
-            if (T < stop_thresh) break;
+            double a = 1.0 - exp(-(double)sigma_scale * (double)sig * (double)dt);
+            double w = T * a;
+            Cr += w * (double)col[0];
+            Cg += w * (double)col[1];
+            Cb += w * (double)col[2];
+            T *= 1.0 - a;
+            if (T < (double)stop_thresh) break;
         }
-        out_rgb[idx * 3 + 0] = C.x;
-        out_rgb[idx * 3 + 1] = C.y;
-        out_rgb[idx * 3 + 2] = C.z;
+        out_rgb[idx * 3 + 0] = (float)Cr;
+        out_rgb[idx * 3 + 1] = (float)Cg;
+        out_rgb[idx * 3 + 2] = (float)Cb;
     }
 }
 
