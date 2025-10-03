@@ -1,0 +1,49 @@
+name: Linux Build
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            ninja-build \
+            zlib1g-dev \
+            libblosc-dev \
+            libtbb-dev \
+            libboost-all-dev \
+            libimath-dev \
+            libopenexr-dev \
+            libjemalloc-dev \
+            nvidia-cuda-toolkit
+
+      - name: Export CUDA environment
+        run: |
+          if [ -d /usr/lib/cuda ]; then
+            echo "CUDA_HOME=/usr/lib/cuda" >> "$GITHUB_ENV"
+            echo "CUDA_PATH=/usr/lib/cuda" >> "$GITHUB_ENV"
+            echo "/usr/lib/cuda/bin" >> "$GITHUB_PATH"
+          elif [ -d /usr/lib/nvidia-cuda-toolkit ]; then
+            echo "CUDA_HOME=/usr/lib/nvidia-cuda-toolkit" >> "$GITHUB_ENV"
+            echo "CUDA_PATH=/usr/lib/nvidia-cuda-toolkit" >> "$GITHUB_ENV"
+            echo "/usr/lib/nvidia-cuda-toolkit/bin" >> "$GITHUB_PATH"
+          else
+            echo "Warning: CUDA toolkit directory not found after installation" >&2
+          fi
+          nvcc --version
+
+      - name: Configure with CMake
+        run: cmake -B build -S . -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build

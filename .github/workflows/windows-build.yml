@@ -1,0 +1,43 @@
+name: Windows Build
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup vcpkg
+        uses: microsoft/setup-vcpkg@v1
+        with:
+          vcpkg-json: vcpkg.json
+
+      - name: Install CUDA Toolkit
+        run: choco install cuda --yes --no-progress --timeout 7200
+        shell: pwsh
+
+      - name: Export CUDA environment
+        shell: pwsh
+        run: |
+          $cudaRoot = Get-ChildItem 'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA' -ErrorAction SilentlyContinue | Sort-Object Name -Descending | Select-Object -First 1
+          if (-not $cudaRoot) { throw 'CUDA installation not found under C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA' }
+          Add-Content -Path $env:GITHUB_ENV -Value "CUDA_PATH=$($cudaRoot.FullName)"
+          Add-Content -Path $env:GITHUB_ENV -Value "CUDA_HOME=$($cudaRoot.FullName)"
+          Add-Content -Path $env:GITHUB_PATH -Value "$($cudaRoot.FullName)\bin"
+          Add-Content -Path $env:GITHUB_PATH -Value "$($cudaRoot.FullName)\libnvvp"
+
+      - name: Configure with CMake
+        shell: pwsh
+        run: |
+          cmake -B build -S . -A x64 `
+            -DCMAKE_TOOLCHAIN_FILE="${{ env.VCPKG_ROOT }}\scripts\buildsystems\vcpkg.cmake" `
+            -DVCPKG_TARGET_TRIPLET=x64-windows `
+            -DCMAKE_CUDA_COMPILER="$Env:CUDA_PATH\bin\nvcc.exe"
+
+      - name: Build
+        run: cmake --build build --config Release
+        shell: pwsh

@@ -1,32 +1,34 @@
-// Verify OpenVDB and tiny-cuda-nn linkage by exercising basic APIs.
-#include <iostream>
+// Copyright Contributors to the OpenVDB Project
+// SPDX-License-Identifier: Apache-2.0
 
-#if DVREN_HAS_OPENVDB
-#  include <openvdb/openvdb.h>
-#endif
+#include <nanovdb/tools/CreatePrimitives.h>
+#include <nanovdb/io/IO.h>
 
-#if DVREN_WITH_TCNN
-#  include <tiny-cuda-nn/common.h>
-#endif
+/// @brief Creates multiple NanoVDB grids, accesses a value in one, and saves all grids to file.
+///
+/// @note This example only depends on NanoVDB.
+int main()
+{
+    try {
+        std::vector<nanovdb::GridHandle<>> handles;
+        // Create multiple NanoVDB grids of various types
+        handles.push_back(nanovdb::tools::createLevelSetSphere<float>(100.0f));
+        handles.push_back(nanovdb::tools::createLevelSetTorus<float>(100.0f, 50.0f));
+        handles.push_back(nanovdb::tools::createLevelSetBox<float>(400.0f, 600.0f, 800.0f));
+        handles.push_back(nanovdb::tools::createLevelSetBBox<float>(400.0f, 600.0f, 800.0f, 10.0f));
+        handles.push_back(nanovdb::tools::createPointSphere<float>(1, 100.0f));
 
-int main() {
-#if DVREN_HAS_OPENVDB
-    // Initialize OpenVDB and create a simple grid
-    openvdb::initialize();
-    auto grid = openvdb::FloatGrid::create(/*background*/ 0.0f);
-    grid->setName("TestGrid");
-    std::cout << "OpenVDB initialized. Grid name: " << grid->getName() << "\n";
-#else
-    std::cout << "OpenVDB disabled at build time.\n";
-#endif
+        auto* dstGrid = handles[0].grid<float>(); // Get a (raw) pointer to the NanoVDB grid form the GridManager.
+        if (!dstGrid)
+            throw std::runtime_error("GridHandle does not contain a grid with value type float");
 
-#if DVREN_WITH_TCNN
-    // Touch tiny-cuda-nn symbols via headers. Print a constexpr from the library.
-    std::cout << "tiny-cuda-nn available. MIN_GPU_ARCH=" << tcnn::MIN_GPU_ARCH << "\n";
-#else
-    std::cout << "tiny-cuda-nn disabled at build time.\n";
-#endif
+        // Access and print out a single value (inside the level set) from both grids
+        printf("NanoVDB cpu: %4.2f\n", dstGrid->tree().getValue(nanovdb::Coord(99, 0, 0)));
 
-    std::cout << "dvren startup complete." << std::endl;
+        nanovdb::io::writeGrids<nanovdb::HostBuffer, std::vector>("primitives.nvdb", handles); // Write the NanoVDB grids to file and throw if writing fails
+    }
+    catch (const std::exception& e) {
+        std::cerr << "An exception occurred: \"" << e.what() << "\"" << std::endl;
+    }
     return 0;
 }

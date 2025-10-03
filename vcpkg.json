@@ -1,5 +1,17 @@
 {
-  "name": "myproj",
+  "name": "openvdb-deps",
   "version": "0.1.0",
-  "dependencies": ["openvdb"]
+  "supports": "windows & x64",
+  "dependencies": [
+    "zlib",
+    "blosc",
+    "tbb",
+    "boost-iostreams",
+    "boost-any",
+    "boost-algorithm",
+    "boost-interprocess",
+    "imath",
+    "openexr",
+    "jemalloc"
+  ]
 }
