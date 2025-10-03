@@ -1,31 +1,22 @@
-// Copyright Contributors to the OpenVDB Project
-// SPDX-License-Identifier: Apache-2.0
+#include <nanovdb/util/IO.h> // this is required to read (and write) NanoVDB files on the host
 
-#include <nanovdb/tools/CreatePrimitives.h>
-#include <nanovdb/io/IO.h>
-
-/// @brief Creates multiple NanoVDB grids, accesses a value in one, and saves all grids to file.
+/// @brief Read a NanoVDB grid from a file and print out multiple values.
 ///
-/// @note This example only depends on NanoVDB.
+/// @note Note This example does NOT depend on OpenVDB (nor CUDA), only NanoVDB.
 int main()
 {
     try {
-        std::vector<nanovdb::GridHandle<>> handles;
-        // Create multiple NanoVDB grids of various types
-        handles.push_back(nanovdb::tools::createLevelSetSphere<float>(100.0f));
-        handles.push_back(nanovdb::tools::createLevelSetTorus<float>(100.0f, 50.0f));
-        handles.push_back(nanovdb::tools::createLevelSetBox<float>(400.0f, 600.0f, 800.0f));
-        handles.push_back(nanovdb::tools::createLevelSetBBox<float>(400.0f, 600.0f, 800.0f, 10.0f));
-        handles.push_back(nanovdb::tools::createPointSphere<float>(1, 100.0f));
+        auto handle = nanovdb::io::readGrid("data/sphere.nvdb"); // reads first grid from file
 
-        auto* dstGrid = handles[0].grid<float>(); // Get a (raw) pointer to the NanoVDB grid form the GridManager.
-        if (!dstGrid)
-            throw std::runtime_error("GridHandle does not contain a grid with value type float");
+        auto* grid = handle.grid<float>(); // get a (raw) pointer to a NanoVDB grid of value type float
 
-        // Access and print out a single value (inside the level set) from both grids
-        printf("NanoVDB cpu: %4.2f\n", dstGrid->tree().getValue(nanovdb::Coord(99, 0, 0)));
+        if (!grid)
+            throw std::runtime_error("File did not contain a grid with value type float");
 
-        nanovdb::io::writeGrids<nanovdb::HostBuffer, std::vector>("primitives.nvdb", handles); // Write the NanoVDB grids to file and throw if writing fails
+        auto acc = grid->getAccessor(); // create an accessor for fast access to multiple values
+        for (int i = 97; i < 104; ++i) {
+            printf("(%3i,0,0) NanoVDB cpu: % -4.2f\n", i, acc.getValue(nanovdb::Coord(i, 0, 0)));
+        }
     }
     catch (const std::exception& e) {
         std::cerr << "An exception occurred: \"" << e.what() << "\"" << std::endl;
