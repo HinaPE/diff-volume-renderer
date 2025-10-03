@@ -75,7 +75,7 @@ int main()
     field_grid_dense_create(gd, fp);
 
     RaysSOA rays{W, H, o.data(), d.data(), t0.data(), t1.data()};
-    SamplingSpec spec{256, 0.0f, 1.0f, 0.0f};
+    SamplingSpec spec{512, 0.0f, 5.0f, 0.0f};
     spec.dt = (t1[0] - t0[0]) / spec.n_steps;
     RenderFlags flags{0, 1};
 
@@ -96,7 +96,7 @@ int main()
     size_t vid = (size_t)vz * ny * nx + vy * nx + vx;
     float g_analytic = gsig[vid];
 
-    float eps = 1e-4f;
+    float eps = 1e-2f;
     float old = sigma[vid];
     sigma[vid] = old + eps;
     FieldProvider fp_pos{};
