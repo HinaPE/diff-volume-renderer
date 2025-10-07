@@ -159,12 +159,6 @@ typedef struct hp_grads_t {
     hp_tensor camera;
 } hp_grads_t;
 
-typedef struct hp_runner_options {
-    const char* manifest_path;
-    const char* thresholds_path;
-    const char* perf_scenarios_path;
-} hp_runner_options;
-
 HP_API hp_version hp_get_version(void);
 
 HP_API hp_status hp_ctx_create(const hp_ctx_desc* desc, hp_ctx** out_ctx);
@@ -185,8 +179,6 @@ HP_API hp_status hp_field_create_grid_sigma(const hp_ctx* ctx, const hp_tensor* 
 HP_API hp_status hp_field_create_grid_color(const hp_ctx* ctx, const hp_tensor* grid, uint32_t interp, uint32_t oob, hp_field** out_field);
 HP_API hp_status hp_field_create_hash_mlp(const hp_ctx* ctx, const hp_tensor* params, hp_field** out_field);
 HP_API void hp_field_release(hp_field* field);
-
-HP_API hp_status hp_runner_run(const hp_ctx* ctx, const hp_runner_options* options);
 
 #ifdef __cplusplus
 }

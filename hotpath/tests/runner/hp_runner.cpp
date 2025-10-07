@@ -5,13 +5,12 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
-#include <cstring>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <limits>
-#include <map>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -23,6 +22,10 @@
 #endif
 
 namespace {
+
+struct RunnerOptions {
+    std::filesystem::path manifest_path{"tests/manifest.yaml"};
+};
 
 enum class TestStatus {
     pass,
@@ -72,25 +75,25 @@ std::string escape_json(const std::string& input) {
     out.reserve(input.size() + 8);
     for (unsigned char c : input) {
         switch (c) {
-            case '\\':
-                out += "\\\\";
+            case '\\\\':
+                out += "\\\\\\\\";
                 break;
-            case '"':
-                out += "\\\"";
+            case '\"':
+                out += "\\\\\"";
                 break;
-            case '\n':
-                out += "\\n";
+            case '\\n':
+                out += "\\\\n";
                 break;
-            case '\r':
-                out += "\\r";
+            case '\\r':
+                out += "\\\\r";
                 break;
-            case '\t':
-                out += "\\t";
+            case '\\t':
+                out += "\\\\t";
                 break;
             default:
                 if (c < 0x20) {
                     char buf[7];
-                    std::snprintf(buf, sizeof(buf), "\\u%04x", static_cast<unsigned int>(c));
+                    std::snprintf(buf, sizeof(buf), "\\\\u%04x", static_cast<unsigned int>(c));
                     out += buf;
                 } else {
                     out += static_cast<char>(c);
@@ -100,6 +103,7 @@ std::string escape_json(const std::string& input) {
     }
     return out;
 }
+
 std::string trim(const std::string& s) {
     const auto begin = s.find_first_not_of(" \t\r\n");
     if (begin == std::string::npos) {
@@ -122,12 +126,8 @@ std::vector<std::string> default_cases() {
     };
 }
 
-std::vector<std::string> load_manifest_cases(const hp_runner_options* options) {
-    std::filesystem::path manifest_path = "tests/manifest.yaml";
-    if (options != nullptr && options->manifest_path != nullptr) {
-        manifest_path = options->manifest_path;
-    }
-
+std::vector<std::string> load_manifest_cases(const RunnerOptions& options) {
+    std::filesystem::path manifest_path = options.manifest_path;
     std::ifstream file(manifest_path);
     if (!file.is_open()) {
         return default_cases();
@@ -179,7 +179,7 @@ std::string build_scoreboard(const std::vector<CaseResult>& cases) {
     size_t skip_count = 0;
     for (const auto& c : cases) {
         if (!first) {
-            oss << ',';
+            oss << ",";
         }
         first = false;
         oss << "{\"name\":\"" << escape_json(c.name) << "\",\"status\":\"" << status_to_string(c.status) << "\"";
@@ -230,7 +230,6 @@ hp_plan_desc make_basic_plan_desc(uint32_t width, uint32_t height, float t_near,
     desc.sampling.mode = HP_SAMPLING_FIXED;
     return desc;
 }
-
 std::vector<float> copy_vec3_buffer(const void* ptr, size_t count) {
     std::vector<float> out(count * 3U, 0.0f);
     if (ptr != nullptr && count > 0) {
@@ -303,25 +302,25 @@ bool check_monotone_t(const std::vector<float>& positions,
     return true;
 }
 
-hp_tensor make_tensor(float* data, hp_dtype dtype, uint32_t rank, const std::array<int64_t, 4>& shape) {
+hp_tensor make_tensor(void* data, hp_dtype dtype, std::initializer_list<int64_t> shape) {
     hp_tensor t{};
     t.data = data;
     t.dtype = dtype;
     t.memspace = HP_MEMSPACE_HOST;
-    t.rank = rank;
-    for (uint32_t i = 0; i < rank; ++i) {
-        t.shape[i] = shape[i];
+    t.rank = static_cast<uint32_t>(shape.size());
+    uint32_t idx = 0;
+    for (int64_t dim : shape) {
+        t.shape[idx++] = dim;
     }
-    if (rank >= 1) {
-        t.stride[rank - 1] = 1;
-        for (int i = static_cast<int>(rank) - 2; i >= 0; --i) {
+    if (t.rank > 0) {
+        t.stride[t.rank - 1] = 1;
+        for (int i = static_cast<int>(t.rank) - 2; i >= 0; --i) {
             t.stride[i] = t.stride[i + 1] * t.shape[i + 1];
         }
     }
     return t;
 }
-
-CaseResult test_ray_cpu_basic(hp_ctx* ctx, const hp_runner_options*) {
+CaseResult test_ray_cpu_basic(hp_ctx* ctx) {
     CaseResult result{"ray_cpu_basic", TestStatus::pass, ""};
     hp_plan_desc plan_desc = make_basic_plan_desc(4, 4, 0.1f, 2.0f);
     hp_plan* plan = nullptr;
@@ -415,7 +414,7 @@ CaseResult test_ray_cpu_basic(hp_ctx* ctx, const hp_runner_options*) {
     return result;
 }
 
-CaseResult test_ray_cpu_roi(hp_ctx* ctx, const hp_runner_options*) {
+CaseResult test_ray_cpu_roi(hp_ctx* ctx) {
     CaseResult result{"ray_cpu_roi", TestStatus::pass, ""};
     hp_plan_desc plan_desc = make_basic_plan_desc(8, 6, 0.5f, 3.0f);
     plan_desc.roi.x = 2;
@@ -463,7 +462,7 @@ CaseResult test_ray_cpu_roi(hp_ctx* ctx, const hp_runner_options*) {
     return result;
 }
 
-CaseResult test_ray_cpu_override(hp_ctx* ctx, const hp_runner_options*) {
+CaseResult test_ray_cpu_override(hp_ctx* ctx) {
     CaseResult result{"ray_cpu_override", TestStatus::pass, ""};
     hp_plan_desc plan_desc = make_basic_plan_desc(2, 1, 0.2f, 4.0f);
     hp_plan* plan = nullptr;
@@ -484,12 +483,11 @@ CaseResult test_ray_cpu_override(hp_ctx* ctx, const hp_runner_options*) {
     std::vector<uint32_t> override_ids{3U, 7U};
 
     hp_rays_t override_rays{};
-    override_rays.origins = make_tensor(override_origins.data(), HP_DTYPE_F32, 2, {static_cast<int64_t>(ray_count), 3, 0, 0});
-    override_rays.directions = make_tensor(override_dirs.data(), HP_DTYPE_F32, 2, {static_cast<int64_t>(ray_count), 3, 0, 0});
-    override_rays.t_near = make_tensor(override_near.data(), HP_DTYPE_F32, 1, {static_cast<int64_t>(ray_count), 0, 0, 0});
-    override_rays.t_far = make_tensor(override_far.data(), HP_DTYPE_F32, 1, {static_cast<int64_t>(ray_count), 0, 0, 0});
-    override_rays.pixel_ids = make_tensor(reinterpret_cast<float*>(override_ids.data()), HP_DTYPE_U32, 1, {static_cast<int64_t>(ray_count), 0, 0, 0});
-    override_rays.pixel_ids.memspace = HP_MEMSPACE_HOST;
+    override_rays.origins = make_tensor(override_origins.data(), HP_DTYPE_F32, {static_cast<int64_t>(ray_count), 3});
+    override_rays.directions = make_tensor(override_dirs.data(), HP_DTYPE_F32, {static_cast<int64_t>(ray_count), 3});
+    override_rays.t_near = make_tensor(override_near.data(), HP_DTYPE_F32, {static_cast<int64_t>(ray_count)});
+    override_rays.t_far = make_tensor(override_far.data(), HP_DTYPE_F32, {static_cast<int64_t>(ray_count)});
+    override_rays.pixel_ids = make_tensor(override_ids.data(), HP_DTYPE_U32, {static_cast<int64_t>(ray_count)});
 
     std::array<std::byte, 1024> workspace{};
     hp_rays_t output{};
@@ -518,9 +516,8 @@ CaseResult test_ray_cpu_override(hp_ctx* ctx, const hp_runner_options*) {
     hp_plan_release(plan);
     return result;
 }
-
 #if defined(HP_WITH_CUDA)
-CaseResult test_ray_cuda_basic(hp_ctx* ctx, const hp_runner_options*) {
+CaseResult test_ray_cuda_basic(hp_ctx* ctx) {
     CaseResult result{"ray_cuda_basic", TestStatus::pass, ""};
     int device_count = 0;
     if (cudaGetDeviceCount(&device_count) != cudaSuccess || device_count == 0) {
@@ -618,7 +615,8 @@ CaseResult test_ray_cuda_basic(hp_ctx* ctx, const hp_runner_options*) {
 
     for (size_t idx = 0; idx < ray_count; ++idx) {
         const size_t base = idx * 3U;
-        if (std::fabs(h_origins[base + 0]) > 1e-4f || std::fabs(h_origins[base + 1]) > 1e-4f) {
+        if (std::fabs(h_origins[base + 0]) > 1e-4f ||
+            std::fabs(h_origins[base + 1]) > 1e-4f) {
             result.status = TestStatus::fail;
             result.message = "CUDA origin mismatch";
             hp_plan_release(plan);
@@ -646,8 +644,7 @@ CaseResult test_ray_cuda_basic(hp_ctx* ctx, const hp_runner_options*) {
     return result;
 }
 #endif  // HP_WITH_CUDA
-
-CaseResult test_samp_cpu_basic(hp_ctx* ctx, const hp_runner_options*) {
+CaseResult test_samp_cpu_basic(hp_ctx* ctx) {
     CaseResult result{"samp_cpu_basic", TestStatus::pass, ""};
     hp_plan_desc plan_desc = make_basic_plan_desc(1, 1, 0.0f, 1.0f);
     plan_desc.sampling.dt = 0.25f;
@@ -685,8 +682,8 @@ CaseResult test_samp_cpu_basic(hp_ctx* ctx, const hp_runner_options*) {
         0.1f, 0.1f, 0.5f
     };
 
-    hp_tensor sigma_tensor = make_tensor(sigma_grid.data(), HP_DTYPE_F32, 3, {2, 2, 2, 0});
-    hp_tensor color_tensor = make_tensor(color_grid.data(), HP_DTYPE_F32, 4, {2, 2, 2, 3});
+    hp_tensor sigma_tensor = make_tensor(sigma_grid.data(), HP_DTYPE_F32, {2, 2, 2});
+    hp_tensor color_tensor = make_tensor(color_grid.data(), HP_DTYPE_F32, {2, 2, 2, 3});
 
     hp_field* fs = nullptr;
     hp_field* fc = nullptr;
@@ -772,7 +769,7 @@ CaseResult test_samp_cpu_basic(hp_ctx* ctx, const hp_runner_options*) {
     return result;
 }
 
-CaseResult test_samp_cpu_oob_zero(hp_ctx* ctx, const hp_runner_options*) {
+CaseResult test_samp_cpu_oob_zero(hp_ctx* ctx) {
     CaseResult result{"samp_cpu_oob_zero", TestStatus::pass, ""};
     hp_plan_desc plan_desc = make_basic_plan_desc(1, 1, 0.0f, 2.0f);
     plan_desc.sampling.dt = 0.5f;
@@ -799,7 +796,7 @@ CaseResult test_samp_cpu_oob_zero(hp_ctx* ctx, const hp_runner_options*) {
     }
 
     std::vector<float> sigma_grid(8, 1.0f);
-    hp_tensor sigma_tensor = make_tensor(sigma_grid.data(), HP_DTYPE_F32, 3, {2, 2, 2, 0});
+    hp_tensor sigma_tensor = make_tensor(sigma_grid.data(), HP_DTYPE_F32, {2, 2, 2});
 
     hp_field* fs = nullptr;
     status = hp_field_create_grid_sigma(ctx, &sigma_tensor, HP_INTERP_LINEAR, HP_OOB_ZERO, &fs);
@@ -846,7 +843,7 @@ CaseResult test_samp_cpu_oob_zero(hp_ctx* ctx, const hp_runner_options*) {
     return result;
 }
 
-CaseResult test_samp_cpu_oob_clamp(hp_ctx* ctx, const hp_runner_options*) {
+CaseResult test_samp_cpu_oob_clamp(hp_ctx* ctx) {
     CaseResult result{"samp_cpu_oob_clamp", TestStatus::pass, ""};
     hp_plan_desc plan_desc = make_basic_plan_desc(1, 1, 0.0f, 2.0f);
     plan_desc.sampling.dt = 0.5f;
@@ -874,7 +871,7 @@ CaseResult test_samp_cpu_oob_clamp(hp_ctx* ctx, const hp_runner_options*) {
 
     std::vector<float> sigma_grid(8, 0.0f);
     sigma_grid[4] = 2.0f;
-    hp_tensor sigma_tensor = make_tensor(sigma_grid.data(), HP_DTYPE_F32, 3, {2, 2, 2, 0});
+    hp_tensor sigma_tensor = make_tensor(sigma_grid.data(), HP_DTYPE_F32, {2, 2, 2});
 
     hp_field* fs = nullptr;
     status = hp_field_create_grid_sigma(ctx, &sigma_tensor, HP_INTERP_NEAREST, HP_OOB_CLAMP, &fs);
@@ -901,6 +898,7 @@ CaseResult test_samp_cpu_oob_clamp(hp_ctx* ctx, const hp_runner_options*) {
     for (float s : sigma) {
         if (std::fabs(s - 2.0f) < 1e-3f) {
             found_clamped = true;
+            break;
         }
     }
     if (!found_clamped) {
@@ -916,7 +914,7 @@ CaseResult test_samp_cpu_oob_clamp(hp_ctx* ctx, const hp_runner_options*) {
     return result;
 }
 
-CaseResult test_samp_cpu_stratified(hp_ctx* ctx, const hp_runner_options*) {
+CaseResult test_samp_cpu_stratified(hp_ctx* ctx) {
     CaseResult result{"samp_cpu_stratified_determinism", TestStatus::pass, ""};
     hp_plan_desc plan_desc = make_basic_plan_desc(1, 1, 0.0f, 1.0f);
     plan_desc.sampling.dt = 0.2f;
@@ -945,7 +943,7 @@ CaseResult test_samp_cpu_stratified(hp_ctx* ctx, const hp_runner_options*) {
     }
 
     std::vector<float> sigma_grid(8, 1.0f);
-    hp_tensor sigma_tensor = make_tensor(sigma_grid.data(), HP_DTYPE_F32, 3, {2, 2, 2, 0});
+    hp_tensor sigma_tensor = make_tensor(sigma_grid.data(), HP_DTYPE_F32, {2, 2, 2});
     hp_field* fs = nullptr;
     status = hp_field_create_grid_sigma(ctx, &sigma_tensor, HP_INTERP_LINEAR, HP_OOB_ZERO, &fs);
     if (status != HP_STATUS_SUCCESS || fs == nullptr) {
@@ -1025,29 +1023,44 @@ CaseResult test_samp_cpu_stratified(hp_ctx* ctx, const hp_runner_options*) {
     hp_plan_release(plan);
     return result;
 }
-
-using TestFn = CaseResult(*)(hp_ctx*, const hp_runner_options*);
+using TestFn = CaseResult(*)(hp_ctx*);
 
 std::unordered_map<std::string, TestFn> build_registry() {
-    return {
+    std::unordered_map<std::string, TestFn> registry{
         {"ray_cpu_basic", test_ray_cpu_basic},
         {"ray_cpu_roi", test_ray_cpu_roi},
         {"ray_cpu_override", test_ray_cpu_override},
-#if defined(HP_WITH_CUDA)
-        {"ray_cuda_basic", test_ray_cuda_basic},
-#endif
         {"samp_cpu_basic", test_samp_cpu_basic},
         {"samp_cpu_oob_zero", test_samp_cpu_oob_zero},
         {"samp_cpu_oob_clamp", test_samp_cpu_oob_clamp},
         {"samp_cpu_stratified_determinism", test_samp_cpu_stratified}
     };
+#if defined(HP_WITH_CUDA)
+    registry.emplace("ray_cuda_basic", test_ray_cuda_basic);
+#endif
+    return registry;
+}
+
+RunnerOptions parse_options(int argc, char** argv) {
+    RunnerOptions opts{};
+    if (argc > 1) {
+        opts.manifest_path = argv[1];
+    }
+    return opts;
 }
 
 }  // namespace
 
-extern "C" HP_API hp_status hp_runner_run(const hp_ctx* ctx, const hp_runner_options* options) {
-    if (ctx == nullptr) {
-        return HP_STATUS_INVALID_ARGUMENT;
+int main(int argc, char** argv) {
+    RunnerOptions options = parse_options(argc, argv);
+
+    hp_ctx* ctx = nullptr;
+    const hp_status ctx_status = hp_ctx_create(nullptr, &ctx);
+    if (ctx_status != HP_STATUS_SUCCESS || ctx == nullptr) {
+        std::vector<CaseResult> failure_cases{
+            {"ctx_create", TestStatus::fail, std::string("hp_ctx_create failed: ") + status_to_cstr(ctx_status)}};
+        std::cout << build_scoreboard(failure_cases);
+        return 1;
     }
 
     std::vector<std::string> case_names = load_manifest_cases(options);
@@ -1061,7 +1074,7 @@ extern "C" HP_API hp_status hp_runner_run(const hp_ctx* ctx, const hp_runner_opt
             results.push_back(CaseResult{name, TestStatus::fail, "unknown test"});
             continue;
         }
-        results.push_back(it->second(const_cast<hp_ctx*>(ctx), options));
+        results.push_back(it->second(ctx));
     }
 
     const std::string scoreboard = build_scoreboard(results);
@@ -1074,5 +1087,7 @@ extern "C" HP_API hp_status hp_runner_run(const hp_ctx* ctx, const hp_runner_opt
             break;
         }
     }
-    return has_failures ? HP_STATUS_INTERNAL_ERROR : HP_STATUS_SUCCESS;
+
+    hp_ctx_release(ctx);
+    return has_failures ? 1 : 0;
 }
