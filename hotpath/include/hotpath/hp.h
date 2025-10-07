@@ -54,6 +54,27 @@ typedef enum hp_camera_model {
     HP_CAMERA_ORTHOGRAPHIC = 1
 } hp_camera_model;
 
+typedef enum hp_sampling_mode {
+    HP_SAMPLING_FIXED = 0,
+    HP_SAMPLING_STRATIFIED = 1
+} hp_sampling_mode;
+
+typedef enum hp_interp_mode {
+    HP_INTERP_NEAREST = 0,
+    HP_INTERP_LINEAR = 1
+} hp_interp_mode;
+
+typedef enum hp_oob_policy {
+    HP_OOB_ZERO = 0,
+    HP_OOB_CLAMP = 1
+} hp_oob_policy;
+
+typedef struct hp_sampling_desc {
+    float dt;
+    uint32_t max_steps;
+    hp_sampling_mode mode;
+} hp_sampling_desc;
+
 typedef struct hp_tensor {
     void* data;
     hp_dtype dtype;
@@ -93,6 +114,7 @@ typedef struct hp_plan_desc {
     uint64_t seed;
     hp_camera_desc camera;
     hp_roi_desc roi;
+    hp_sampling_desc sampling;
 } hp_plan_desc;
 
 typedef struct hp_ctx hp_ctx;

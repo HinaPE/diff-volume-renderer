@@ -10,14 +10,14 @@ int main(int, char**) {
         return 1;
     }
 
-    const hp_status run_status = hp_runner_run(ctx, nullptr);
-    if (run_status != HP_STATUS_SUCCESS) {
-        std::cerr << "hp_runner_run failed with status " << static_cast<int>(run_status) << "\n";
-        hp_ctx_release(ctx);
-        return 2;
-    }
+    hp_runner_options opts{};
+    opts.manifest_path = "tests/manifest.yaml";
+    opts.thresholds_path = "tests/thresholds.yaml";
+    opts.perf_scenarios_path = "tests/perf_scenarios.yaml";
 
+    const hp_status run_status = hp_runner_run(ctx, &opts);
     hp_ctx_release(ctx);
-    return 0;
+
+    return run_status == HP_STATUS_SUCCESS ? 0 : 1;
 }
 

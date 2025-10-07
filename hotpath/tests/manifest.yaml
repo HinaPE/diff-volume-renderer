@@ -1,1 +1,9 @@
-# Placeholder manifest for HP0 bootstrap.
+cases:
+  - ray_cpu_basic
+  - ray_cpu_roi
+  - ray_cpu_override
+  - ray_cuda_basic
+  - samp_cpu_basic
+  - samp_cpu_oob_zero
+  - samp_cpu_oob_clamp
+  - samp_cpu_stratified_determinism

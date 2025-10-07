@@ -7,35 +7,9 @@
 #include <cstring>
 #include <limits>
 
+#include "workspace.hpp"
+
 namespace {
-
-struct WorkspaceAllocator {
-    std::byte* ptr{nullptr};
-    size_t remaining{0};
-
-    WorkspaceAllocator(void* base, size_t bytes) {
-        ptr = static_cast<std::byte*>(base);
-        remaining = bytes;
-    }
-
-    void* allocate(size_t bytes, size_t alignment) {
-        if (bytes == 0) {
-            return nullptr;
-        }
-        uintptr_t current = reinterpret_cast<uintptr_t>(ptr);
-        uintptr_t aligned = (current + alignment - 1U) & ~(alignment - 1U);
-        size_t padding = static_cast<size_t>(aligned - current);
-        if (padding > remaining || bytes > (remaining - padding)) {
-            return nullptr;
-        }
-        ptr += padding;
-        remaining -= padding;
-        void* out = ptr;
-        ptr += bytes;
-        remaining -= bytes;
-        return out;
-    }
-};
 
 hp_status copy_override_cpu(const hp_rays_t* override_rays,
                             hp_rays_t* rays,
@@ -107,7 +81,7 @@ void configure_output_tensors(hp_rays_t* rays, size_t ray_count) {
     rays->pixel_ids.stride[0] = 1;
 }
 
-hp_status ensure_output_buffers(hp_rays_t* rays, size_t ray_count, WorkspaceAllocator& allocator) {
+hp_status ensure_output_buffers(hp_rays_t* rays, size_t ray_count, hp_workspace_allocator& allocator) {
     configure_output_tensors(rays, ray_count);
     if (ray_count == 0U) {
         return HP_STATUS_SUCCESS;
@@ -162,7 +136,7 @@ hp_status ray_generate_cpu(const hp_plan* plan,
     }
     const size_t ray_count = static_cast<size_t>(ray_count_u64);
 
-    WorkspaceAllocator allocator(ws, ws_bytes);
+    hp_workspace_allocator allocator(ws, ws_bytes);
     const hp_status buffer_status = ensure_output_buffers(rays, ray_count, allocator);
     if (buffer_status != HP_STATUS_SUCCESS) {
         return buffer_status;

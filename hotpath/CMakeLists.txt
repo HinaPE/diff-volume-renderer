@@ -27,7 +27,10 @@ endif ()
 set(DVREN_HP_CORE_SOURCES
     src/runtime/hp_runtime.cpp
     src/runtime/api_ray.cpp
+    src/runtime/hp_runner_impl.cpp
     src/cpu/ray_cpu.cpp
+    src/cpu/samp_cpu.cpp
+    src/cpu/grid_dense_cpu.cpp
 )
 
 if (DVREN_BUILD_CUDA)

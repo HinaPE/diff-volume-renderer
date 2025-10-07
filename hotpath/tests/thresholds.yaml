@@ -1,1 +1,3 @@
-# Placeholder thresholds for HP0 bootstrap.
+thresholds:
+  monotone_t_tol: 1.0e-4
+  stratified_midpoint_tol: 1.0e-2

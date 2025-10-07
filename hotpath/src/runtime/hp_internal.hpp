@@ -24,6 +24,10 @@ enum class hp_field_kind : uint32_t {
 struct hp_field {
     hp_field_kind kind{hp_field_kind::dense_sigma};
     hp_tensor source{};
+    hp_interp_mode interp{HP_INTERP_LINEAR};
+    hp_oob_policy oob{HP_OOB_ZERO};
+    float world_min[3]{0.0f, 0.0f, 0.0f};
+    float world_max[3]{1.0f, 1.0f, 1.0f};
 };
 
 namespace hp_internal {
@@ -41,5 +45,26 @@ hp_status ray_generate_cuda(const hp_plan* plan,
                             void* ws,
                             size_t ws_bytes);
 #endif
+
+hp_status samp_generate_cpu(const hp_plan* plan,
+                            const hp_field* fs,
+                            const hp_field* fc,
+                            const hp_rays_t* rays,
+                            hp_samp_t* samp,
+                            void* ws,
+                            size_t ws_bytes);
+
+#if defined(HP_WITH_CUDA)
+hp_status samp_generate_cuda(const hp_plan* plan,
+                             const hp_field* fs,
+                             const hp_field* fc,
+                             const hp_rays_t* rays,
+                             hp_samp_t* samp,
+                             void* ws,
+                             size_t ws_bytes);
+#endif
+
+float sample_grid_sigma_cpu(const hp_field* field, const float pos[3], hp_status* status);
+void sample_grid_color_cpu(const hp_field* field, const float pos[3], float out_rgb[3], hp_status* status);
 
 }  // namespace hp_internal
