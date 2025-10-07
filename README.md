@@ -19,6 +19,8 @@ cmake --build build --target dvren_render
 
 `examples/simple_volume.json` 提供了一个 2×2×2 的最小体积示例，生成的 `output.ppm` 为 PPM(P6) 格式。命令行工具完全依赖 CPU 路径，可在没有 GPU 的环境下验证主流程。
 
+`render.options` 支持配置 `use_fused_path`、`enable_graph` 与统计开关，命令行工具会额外输出各类 workspace 的内存占用，便于排查性能与内存瓶颈。
+
 前向/反向编排封装已暴露在 `dvren/render/renderer.hpp` 中，`tests/core/test_core.cpp` 展示了如何在一体化前向/反向流程中累积体素梯度与相机梯度。
 
 ---

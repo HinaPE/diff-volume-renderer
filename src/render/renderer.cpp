@@ -5,6 +5,8 @@
 #include <cmath>
 #include <cstring>
 #include <numeric>
+#include <span>
+#include <string>
 #include <string_view>
 
 #include "dvren/core/tensor_utils.hpp"
@@ -32,6 +34,12 @@ Renderer::Renderer(const Context& ctx, const Plan& plan, RenderOptions options)
     : ctx_(&ctx), plan_(&plan), options_(options) {
     grad_camera_.assign(12, 0.0f);
     ConfigureGradientTensors(0);
+}
+
+Renderer::~Renderer() {
+#if defined(HP_WITH_CUDA)
+    ReleaseGraph();
+#endif
 }
 
 Status Renderer::EnsureCapacity() {
@@ -234,18 +242,18 @@ Status Renderer::Forward(const DenseGridField& field, ForwardResult& out) {
     RenderStats stats{};
     auto total_begin = std::chrono::steady_clock::now();
 
+    const bool use_fused = options_.use_fused_path && !workspace_buffer_.empty();
+
 #if !defined(HP_WITH_CUDA)
     if (options_.enable_graph) {
         stats.notes.emplace_back("graph_disabled_no_cuda");
     }
 #else
     if (options_.enable_graph) {
-        stats.notes.emplace_back("graph_not_implemented");
+        stats.notes.emplace_back("graph_capture_enabled");
     }
 #endif
-    stats.notes.emplace_back(options_.use_fused_path ? "forward_mode=fused" : "forward_mode=staged");
-
-    const bool use_fused = options_.use_fused_path && !workspace_buffer_.empty();
+    stats.notes.emplace_back(use_fused ? "forward_mode=fused" : "forward_mode=staged");
 
     auto ray_begin = std::chrono::steady_clock::now();
     hp_status hp = hp_ray(plan_->handle(), nullptr, &rays_, nullptr, 0);
@@ -266,6 +274,33 @@ Status Renderer::Forward(const DenseGridField& field, ForwardResult& out) {
     double integrate_ms = 0.0;
     auto samp_begin = std::chrono::steady_clock::now();
     if (use_fused) {
+        struct SamplePtrBackup {
+            void* positions;
+            void* dt;
+            void* sigma;
+            void* color;
+            void* offsets;
+        } samp_backup{samp_.positions.data, samp_.dt.data, samp_.sigma.data, samp_.color.data, samp_.ray_offset.data};
+
+        struct IntlPtrBackup {
+            void* radiance;
+            void* transmittance;
+            void* opacity;
+            void* depth;
+            void* aux;
+        } intl_backup{intl_.radiance.data, intl_.transmittance.data, intl_.opacity.data, intl_.depth.data, intl_.aux.data};
+
+        samp_.positions.data = nullptr;
+        samp_.dt.data = nullptr;
+        samp_.sigma.data = nullptr;
+        samp_.color.data = nullptr;
+        samp_.ray_offset.data = nullptr;
+        intl_.radiance.data = nullptr;
+        intl_.transmittance.data = nullptr;
+        intl_.opacity.data = nullptr;
+        intl_.depth.data = nullptr;
+        intl_.aux.data = nullptr;
+
         hp = hp_samp_int_fused(plan_->handle(),
                                field.sigma_field(),
                                field.color_field(),
@@ -276,6 +311,18 @@ Status Renderer::Forward(const DenseGridField& field, ForwardResult& out) {
                                workspace_buffer_.size());
         auto samp_end = std::chrono::steady_clock::now();
         stats.sample_ms = DurationMilliseconds(samp_begin, samp_end);
+        if (hp != HP_STATUS_SUCCESS) {
+            samp_.positions.data = samp_backup.positions;
+            samp_.dt.data = samp_backup.dt;
+            samp_.sigma.data = samp_backup.sigma;
+            samp_.color.data = samp_backup.color;
+            samp_.ray_offset.data = samp_backup.offsets;
+            intl_.radiance.data = intl_backup.radiance;
+            intl_.transmittance.data = intl_backup.transmittance;
+            intl_.opacity.data = intl_backup.opacity;
+            intl_.depth.data = intl_backup.depth;
+            intl_.aux.data = intl_backup.aux;
+        }
     } else {
         hp = hp_samp(plan_->handle(),
                      field.sigma_field(),
@@ -300,6 +347,19 @@ Status Renderer::Forward(const DenseGridField& field, ForwardResult& out) {
     if (use_fused) {
         CopyOutputsFromWorkspace(last_ray_count_, last_sample_count_);
     }
+
+#if defined(HP_WITH_CUDA)
+    if (options_.enable_graph) {
+        Status graph_status = CaptureGraphForward(field);
+        if (!graph_status.ok()) {
+            stats.notes.emplace_back(std::string("graph_capture_failed:") + graph_status.ToString());
+        } else if (graph_forward_captured_) {
+            stats.notes.emplace_back("graph_forward_captured");
+        } else {
+            stats.notes.emplace_back("graph_capture_unavailable");
+        }
+    }
+#endif
 
     auto img_begin = std::chrono::steady_clock::now();
     hp = hp_img(plan_->handle(), &intl_, &rays_, &img_, workspace_buffer_.data(), workspace_buffer_.size());
@@ -369,6 +429,15 @@ Status Renderer::Backward(DenseGridField& field,
         return accumulate;
     }
 
+#if defined(HP_WITH_CUDA)
+    if (options_.enable_graph) {
+        Status graph_status = CaptureGraphBackward(field, grad_tensor);
+        if (!graph_status.ok()) {
+            return graph_status;
+        }
+    }
+#endif
+
     out.sigma = field.sigma_gradients();
     out.color = field.color_gradients();
     std::copy(grad_camera_.begin(), grad_camera_.end(), out.camera.begin());
@@ -424,6 +493,82 @@ void Renderer::CopyOutputsFromWorkspace(size_t ray_count, size_t sample_count) {
     intl_.aux.data = intl_aux_.empty() ? nullptr : intl_aux_.data();
 }
 
+#if defined(HP_WITH_CUDA)
+Status Renderer::CaptureGraphForward(const DenseGridField& field) {
+    graph_last_error_.clear();
+    graph_forward_captured_ = false;
+    graph_backward_captured_ = false;
+    if (!options_.enable_graph) {
+        return Status::Ok();
+    }
+    const size_t fused_ws = workspace_buffer_.size();
+    const size_t diff_ws = workspace_buffer_.size();
+    if (graph_handle_ == nullptr) {
+        hp_status create_status = hp_graph_create(plan_->handle(),
+                                                  field.sigma_field(),
+                                                  field.color_field(),
+                                                  0,
+                                                  fused_ws,
+                                                  0,
+                                                  diff_ws,
+                                                  &graph_handle_);
+        if (create_status != HP_STATUS_SUCCESS) {
+            graph_last_error_ = Status::FromHotpath(create_status, "hp_graph_create failed").ToString();
+            ReleaseGraph();
+            return Status::Ok();
+        }
+    }
+    hp_status capture_status = hp_graph_capture(graph_handle_,
+                                                plan_->handle(),
+                                                field.sigma_field(),
+                                                field.color_field(),
+                                                nullptr);
+    if (capture_status != HP_STATUS_SUCCESS) {
+        graph_last_error_ = Status::FromHotpath(capture_status, "hp_graph_capture failed").ToString();
+        ReleaseGraph();
+        return Status::Ok();
+    }
+    graph_forward_captured_ = true;
+    graph_last_error_.clear();
+    return Status::Ok();
+}
+
+Status Renderer::CaptureGraphBackward(const DenseGridField& field, const hp_tensor& grad_tensor) {
+    if (!options_.enable_graph) {
+        return Status::Ok();
+    }
+    graph_last_error_.clear();
+    if (!graph_forward_captured_) {
+        CaptureGraphForward(field);
+        if (!graph_forward_captured_) {
+            return Status::Ok();
+        }
+    }
+    hp_status capture_status = hp_graph_capture(graph_handle_,
+                                                plan_->handle(),
+                                                field.sigma_field(),
+                                                field.color_field(),
+                                                &grad_tensor);
+    if (capture_status != HP_STATUS_SUCCESS) {
+        graph_last_error_ = Status::FromHotpath(capture_status, "hp_graph_capture failed").ToString();
+        ReleaseGraph();
+        return Status::Ok();
+    }
+    graph_backward_captured_ = true;
+    return Status::Ok();
+}
+
+void Renderer::ReleaseGraph() {
+    if (graph_handle_ != nullptr) {
+        hp_graph_release(graph_handle_);
+        graph_handle_ = nullptr;
+    }
+    graph_forward_captured_ = false;
+    graph_backward_captured_ = false;
+    graph_last_error_.clear();
+}
+#endif
+
 WorkspaceInfo Renderer::workspace_info() const {
     WorkspaceInfo info{};
     info.ray_buffer_bytes =
@@ -459,10 +604,20 @@ WorkspaceInfo Renderer::workspace_info() const {
         grad_color_samples_.size() * sizeof(float) +
         grad_camera_.size() * sizeof(float);
 
+    info.workspace_buffer_bytes = workspace_buffer_.size();
+
     return info;
 }
 
 }  // namespace dvren
+
+
+
+
+
+
+
+
 
 
 

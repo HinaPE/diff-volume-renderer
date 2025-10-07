@@ -270,6 +270,8 @@ Status RenderToFile(const dvren::Context& ctx,
         return status;
     }
 
+    const auto workspace = renderer.workspace_info();
+
     const auto& desc = plan.descriptor();
     const size_t pixel_count = static_cast<size_t>(desc.width) * static_cast<size_t>(desc.height);
     if (forward.image.size() != pixel_count * 3ULL) {
@@ -299,6 +301,11 @@ Status RenderToFile(const dvren::Context& ctx,
     std::cout << "Forward stats: rays=" << forward.ray_count
               << " samples=" << forward.sample_count
               << " total_ms=" << forward.stats.total_ms << std::endl;
+    std::cout << "Workspace bytes total=" << workspace.total_bytes()
+              << " sample=" << workspace.sample_buffer_bytes
+              << " integration=" << workspace.integration_buffer_bytes
+              << " gradient=" << workspace.gradient_buffer_bytes
+              << " scratch=" << workspace.workspace_buffer_bytes << std::endl;
     return Status::Ok();
 }
 
@@ -361,3 +368,5 @@ int main(int argc, char** argv) {
     std::cout << "Wrote " << std::filesystem::absolute(config.output_path) << std::endl;
     return 0;
 }
+
+

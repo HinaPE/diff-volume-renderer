@@ -44,7 +44,7 @@ target_include_directories(dvren_core PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
 )
-target_link_libraries(dvren_core PUBLIC dvren_hp_core)
+target_link_libraries(dvren_core PUBLIC dvren::hotpath)
 
 add_library(dvren_fields STATIC
     src/fields/dense_grid.cpp

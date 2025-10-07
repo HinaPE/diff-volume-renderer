@@ -52,6 +52,7 @@ endif ()
 add_library(dvren_hp_core STATIC
     ${DVREN_HP_CORE_SOURCES}
 )
+add_library(dvren::hotpath ALIAS dvren_hp_core)
 target_include_directories(dvren_hp_core PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>

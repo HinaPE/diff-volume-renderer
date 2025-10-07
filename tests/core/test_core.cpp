@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <cmath>
 #include <iostream>
 #include <numeric>
 #include <vector>
@@ -15,6 +16,12 @@ int Fail(const std::string& message) {
     return 1;
 }
 
+struct RunOutputs {
+    dvren::ForwardResult forward;
+    dvren::BackwardResult backward;
+    dvren::WorkspaceInfo workspace;
+};
+
 }  // namespace
 
 int main() {
@@ -29,11 +36,11 @@ int main() {
     plan_desc.height = 4;
     plan_desc.t_near = 0.0f;
     plan_desc.t_far = 1.0f;
-    plan_desc.max_rays = plan_desc.width * plan_desc.height;
-    plan_desc.max_samples = plan_desc.max_rays * plan_desc.sampling.max_steps;
     plan_desc.sampling.dt = 0.05f;
     plan_desc.sampling.max_steps = 32;
     plan_desc.sampling.mode = dvren::SamplingMode::kFixed;
+    plan_desc.max_rays = plan_desc.width * plan_desc.height;
+    plan_desc.max_samples = plan_desc.max_rays * plan_desc.sampling.max_steps;
 
     dvren::Plan plan;
     status = dvren::Plan::Create(ctx, plan_desc, plan);
@@ -57,47 +64,105 @@ int main() {
         0.5f, 0.8f, 0.4f
     };
 
-    dvren::DenseGridField field;
-    status = dvren::DenseGridField::Create(ctx, grid_config, field);
+    auto execute_run = [&](const dvren::RenderOptions& options, RunOutputs& outputs) -> dvren::Status {
+        dvren::DenseGridField field;
+        dvren::Status create_status = dvren::DenseGridField::Create(ctx, grid_config, field);
+        if (!create_status.ok()) {
+            return create_status;
+        }
+
+        dvren::Renderer renderer(ctx, plan, options);
+        dvren::Status forward_status = renderer.Forward(field, outputs.forward);
+        if (!forward_status.ok()) {
+            return forward_status;
+        }
+
+        if (outputs.forward.image.empty() ||
+            outputs.forward.ray_count == 0 ||
+            outputs.forward.sample_count == 0) {
+            return dvren::Status(dvren::StatusCode::kInternalError, "forward result invalid");
+        }
+
+        outputs.workspace = renderer.workspace_info();
+        if (outputs.workspace.total_bytes() == 0) {
+            return dvren::Status(dvren::StatusCode::kInternalError, "workspace info empty");
+        }
+
+        const size_t grad_size = outputs.forward.ray_count * 3ULL;
+        std::vector<float> dL_dI(grad_size, 1.0f);
+
+        dvren::Status backward_status = renderer.Backward(field, dL_dI, outputs.backward);
+        if (!backward_status.ok()) {
+            return backward_status;
+        }
+
+        return dvren::Status::Ok();
+    };
+
+    dvren::RenderOptions staged_opts{};
+    staged_opts.use_fused_path = false;
+
+    dvren::RenderOptions fused_opts{};
+    fused_opts.use_fused_path = true;
+
+    dvren::RenderOptions graph_opts{};
+    graph_opts.use_fused_path = false;
+    graph_opts.enable_graph = true;
+
+    RunOutputs staged_outputs{};
+    RunOutputs fused_outputs{};
+    RunOutputs graph_outputs{};
+
+    status = execute_run(staged_opts, staged_outputs);
     if (!status.ok()) {
-        return Fail(std::string("DenseGridField::Create failed: ") + status.ToString());
+        return Fail(std::string("Staged run failed: ") + status.ToString());
     }
 
-    dvren::Renderer renderer(ctx, plan, dvren::RenderOptions{});
-
-    dvren::ForwardResult forward;
-    status = renderer.Forward(field, forward);
+    status = execute_run(fused_opts, fused_outputs);
     if (!status.ok()) {
-        return Fail(std::string("Renderer::Forward failed: ") + status.ToString());
+        return Fail(std::string("Fused run failed: ") + status.ToString());
     }
 
-    if (forward.image.empty() || forward.ray_count == 0 || forward.sample_count == 0) {
-        return Fail("Forward result is empty");
-    }
-
-    const size_t grad_size = forward.ray_count * 3ULL;
-    std::vector<float> dL_dI(grad_size, 1.0f);
-
-    dvren::BackwardResult backward;
-    status = renderer.Backward(field, dL_dI, backward);
+    status = execute_run(graph_opts, graph_outputs);
     if (!status.ok()) {
-        return Fail(std::string("Renderer::Backward failed: ") + status.ToString());
+        return Fail(std::string("Graph run failed: ") + status.ToString());
     }
 
-    const size_t voxel_count = field.voxel_count();
-    if (backward.sigma.size() != voxel_count) {
-        return Fail("Sigma gradient size mismatch");
+    const auto compare_vectors = [](const std::vector<float>& a,
+                                    const std::vector<float>& b,
+                                    float tolerance) -> bool {
+        if (a.size() != b.size()) {
+            return false;
+        }
+        for (size_t i = 0; i < a.size(); ++i) {
+            if (std::fabs(a[i] - b[i]) > tolerance) {
+                return false;
+            }
+        }
+        return true;
+    };
+
+    if (!compare_vectors(staged_outputs.forward.image, fused_outputs.forward.image, 1e-4f)) {
+        return Fail("Forward images diverged between staged and fused paths");
     }
-    if (backward.color.size() != voxel_count * 3ULL) {
-        return Fail("Color gradient size mismatch");
+    if (!compare_vectors(staged_outputs.backward.sigma, fused_outputs.backward.sigma, 1e-4f)) {
+        return Fail("Sigma gradients diverged between staged and fused paths");
+    }
+    if (!compare_vectors(staged_outputs.backward.color, fused_outputs.backward.color, 1e-4f)) {
+        return Fail("Color gradients diverged between staged and fused paths");
     }
 
-    const float sigma_sum = std::accumulate(backward.sigma.begin(), backward.sigma.end(), 0.0f);
+    const float sigma_sum = std::accumulate(staged_outputs.backward.sigma.begin(),
+                                            staged_outputs.backward.sigma.end(),
+                                            0.0f);
     if (!(sigma_sum > 0.0f)) {
         return Fail("Sigma gradients did not accumulate positive values");
     }
 
+    if (!(graph_outputs.workspace.total_bytes() >= staged_outputs.workspace.total_bytes())) {
+        return Fail("Graph workspace accounting invalid");
+    }
+
     return 0;
 }
-
 

@@ -15,7 +15,7 @@
 namespace dvren {
 
 struct RenderOptions {
-    bool use_fused_path{false};
+    bool use_fused_path{true};
     bool enable_graph{false};
     bool capture_stats{true};
 };
@@ -26,13 +26,15 @@ struct WorkspaceInfo {
     size_t integration_buffer_bytes{0};
     size_t image_buffer_bytes{0};
     size_t gradient_buffer_bytes{0};
+    size_t workspace_buffer_bytes{0};
 
     [[nodiscard]] size_t total_bytes() const {
         return ray_buffer_bytes +
                sample_buffer_bytes +
                integration_buffer_bytes +
                image_buffer_bytes +
-               gradient_buffer_bytes;
+               gradient_buffer_bytes +
+               workspace_buffer_bytes;
     }
 };
 
@@ -66,6 +68,7 @@ struct BackwardResult {
 class Renderer {
 public:
     Renderer(const Context& ctx, const Plan& plan, RenderOptions options = {});
+    ~Renderer();
 
     Status Forward(const DenseGridField& field, ForwardResult& out);
     Status Backward(DenseGridField& field,
@@ -84,6 +87,11 @@ private:
     void ConfigureGradientTensors(size_t sample_capacity);
     size_t RequiredWorkspaceBytes(size_t ray_capacity, size_t sample_capacity) const;
     void CopyOutputsFromWorkspace(size_t ray_count, size_t sample_count);
+#if defined(HP_WITH_CUDA)
+    Status CaptureGraphForward(const DenseGridField& field);
+    Status CaptureGraphBackward(const DenseGridField& field, const hp_tensor& grad_tensor);
+    void ReleaseGraph();
+#endif
 
     const Context* ctx_{nullptr};
     const Plan* plan_{nullptr};
@@ -131,6 +139,14 @@ private:
 
     size_t last_ray_count_{0};
     size_t last_sample_count_{0};
+
+#if defined(HP_WITH_CUDA)
+    void* graph_handle_{nullptr};
+    bool graph_forward_captured_{false};
+    bool graph_backward_captured_{false};
+    std::string graph_last_error_;
+#endif
 };
 
 }  // namespace dvren
+
