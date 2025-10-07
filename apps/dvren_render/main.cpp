@@ -10,9 +10,8 @@
 
 #include "dvren/core/context.hpp"
 #include "dvren/core/plan.hpp"
-#include "dvren/core/tensor_utils.hpp"
 #include "dvren/fields/dense_grid.hpp"
-#include "hotpath/hp.h"
+#include "dvren/render/renderer.hpp"
 #include "nlohmann/json.hpp"
 
 namespace dvren::app {
@@ -23,6 +22,7 @@ struct RenderConfig {
     PlanDescriptor plan_desc;
     DenseGridConfig grid_config;
     std::filesystem::path output_path{"frame.ppm"};
+    RenderOptions render_options{};
 };
 
 Status ParseSamplingMode(const std::string& value, SamplingMode& out_mode) {
@@ -225,9 +225,18 @@ Status ParseConfigInternal(const std::filesystem::path& path, RenderConfig& conf
         return Status(StatusCode::kInvalidArgument, ex.what());
     }
 
-    Status render_status = ParsePlan(root.at("render"), config.plan_desc);
+    const auto& render_node = root.at("render");
+
+    Status render_status = ParsePlan(render_node, config.plan_desc);
     if (!render_status.ok()) {
         return render_status;
+    }
+
+    if (render_node.contains("options")) {
+        const auto& opt_node = render_node.at("options");
+        config.render_options.use_fused_path = opt_node.value("use_fused_path", true);
+        config.render_options.enable_graph = opt_node.value("enable_graph", false);
+        config.render_options.capture_stats = opt_node.value("capture_stats", true);
     }
 
     Status volume_status = ParseVolume(root.at("volume"), config.grid_config);
@@ -243,98 +252,28 @@ Status ParseConfigInternal(const std::filesystem::path& path, RenderConfig& conf
     return Status::Ok();
 }
 
-template <typename T>
-bool EnsureCapacity(const std::vector<T>& buffer, size_t required) {
-    return buffer.size() >= required;
+}  // namespace
+
+Status ParseConfigFile(const std::filesystem::path& path, RenderConfig& config) {
+    return ParseConfigInternal(path, config);
 }
 
-Status RunPipelineInternal(const Context& ctx,
-                           const Plan& plan,
-                           const DenseGridField& field,
-                           const std::filesystem::path& output_path) {
-    const hp_plan_desc& desc = plan.descriptor();
-    const size_t ray_capacity = static_cast<size_t>(desc.max_rays);
-    const size_t sample_capacity = static_cast<size_t>(desc.max_samples);
+Status RenderToFile(const dvren::Context& ctx,
+                    const dvren::Plan& plan,
+                    const dvren::DenseGridField& field,
+                    const RenderOptions& options,
+                    const std::filesystem::path& output_path) {
+    dvren::Renderer renderer(ctx, plan, options);
+    dvren::ForwardResult forward;
+    Status status = renderer.Forward(field, forward);
+    if (!status.ok()) {
+        return status;
+    }
+
+    const auto& desc = plan.descriptor();
     const size_t pixel_count = static_cast<size_t>(desc.width) * static_cast<size_t>(desc.height);
-
-    if (ray_capacity == 0 || sample_capacity == 0 || pixel_count == 0) {
-        return Status(StatusCode::kInvalidArgument, "invalid plan capacities");
-    }
-
-    std::vector<float> ray_origins(ray_capacity * 3ULL, 0.0f);
-    std::vector<float> ray_dirs(ray_capacity * 3ULL, 0.0f);
-    std::vector<float> ray_t_near(ray_capacity, 0.0f);
-    std::vector<float> ray_t_far(ray_capacity, 0.0f);
-    std::vector<uint32_t> ray_pixel_ids(ray_capacity, 0U);
-
-    std::vector<float> sample_positions(sample_capacity * 3ULL, 0.0f);
-    std::vector<float> sample_dt(sample_capacity, 0.0f);
-    std::vector<float> sample_sigma(sample_capacity, 0.0f);
-    std::vector<float> sample_color(sample_capacity * 3ULL, 0.0f);
-    std::vector<uint32_t> sample_offsets(ray_capacity + 1ULL, 0U);
-
-    std::vector<float> intl_radiance(ray_capacity * 3ULL, 0.0f);
-    std::vector<float> intl_trans(ray_capacity, 0.0f);
-    std::vector<float> intl_opacity(ray_capacity, 0.0f);
-    std::vector<float> intl_depth(ray_capacity, 0.0f);
-    std::vector<float> intl_aux(sample_capacity * 4ULL, 0.0f);
-
-    std::vector<float> img_image(pixel_count * 3ULL, 0.0f);
-    std::vector<float> img_trans(pixel_count, 0.0f);
-    std::vector<float> img_opacity(pixel_count, 0.0f);
-    std::vector<float> img_depth(pixel_count, 0.0f);
-    std::vector<uint32_t> img_hitmask(pixel_count, 0U);
-
-    if (!EnsureCapacity(sample_offsets, ray_capacity + 1ULL)) {
-        return Status(StatusCode::kInvalidArgument, "insufficient ray offset capacity");
-    }
-
-    hp_rays_t rays{};
-    rays.origins.data = ray_origins.data();
-    rays.directions.data = ray_dirs.data();
-    rays.t_near.data = ray_t_near.data();
-    rays.t_far.data = ray_t_far.data();
-    rays.pixel_ids.data = ray_pixel_ids.data();
-
-    hp_samp_t samp{};
-    samp.positions.data = sample_positions.data();
-    samp.dt.data = sample_dt.data();
-    samp.sigma.data = sample_sigma.data();
-    samp.color.data = sample_color.data();
-    samp.ray_offset.data = sample_offsets.data();
-
-    hp_intl_t intl{};
-    intl.radiance.data = intl_radiance.data();
-    intl.transmittance.data = intl_trans.data();
-    intl.opacity.data = intl_opacity.data();
-    intl.depth.data = intl_depth.data();
-    intl.aux.data = intl_aux.data();
-
-    hp_img_t img{};
-    img.image.data = img_image.data();
-    img.trans.data = img_trans.data();
-    img.opacity.data = img_opacity.data();
-    img.depth.data = img_depth.data();
-    img.hitmask.data = img_hitmask.data();
-
-    hp_status status = hp_ray(plan.handle(), nullptr, &rays, nullptr, 0);
-    if (status != HP_STATUS_SUCCESS) {
-        return Status::FromHotpath(status, "hp_ray failed");
-    }
-
-    status = hp_samp(plan.handle(), field.sigma_field(), field.color_field(), &rays, &samp, nullptr, 0);
-    if (status != HP_STATUS_SUCCESS) {
-        return Status::FromHotpath(status, "hp_samp failed");
-    }
-
-    status = hp_int(plan.handle(), &samp, &intl, nullptr, 0);
-    if (status != HP_STATUS_SUCCESS) {
-        return Status::FromHotpath(status, "hp_int failed");
-    }
-
-    status = hp_img(plan.handle(), &intl, &rays, &img, nullptr, 0);
-    if (status != HP_STATUS_SUCCESS) {
-        return Status::FromHotpath(status, "hp_img failed");
+    if (forward.image.size() != pixel_count * 3ULL) {
+        return Status(StatusCode::kInternalError, "forward output size mismatch");
     }
 
     std::ofstream out(output_path, std::ios::binary);
@@ -345,9 +284,9 @@ Status RunPipelineInternal(const Context& ctx,
     out << "P6\n" << desc.width << " " << desc.height << "\n255\n";
     for (size_t idx = 0; idx < pixel_count; ++idx) {
         const size_t base = idx * 3ULL;
-        const float r = std::clamp(img_image[base + 0], 0.0f, 1.0f);
-        const float g = std::clamp(img_image[base + 1], 0.0f, 1.0f);
-        const float b = std::clamp(img_image[base + 2], 0.0f, 1.0f);
+        const float r = std::clamp(forward.image[base + 0], 0.0f, 1.0f);
+        const float g = std::clamp(forward.image[base + 1], 0.0f, 1.0f);
+        const float b = std::clamp(forward.image[base + 2], 0.0f, 1.0f);
         const unsigned char r_byte = static_cast<unsigned char>(std::round(r * 255.0f));
         const unsigned char g_byte = static_cast<unsigned char>(std::round(g * 255.0f));
         const unsigned char b_byte = static_cast<unsigned char>(std::round(b * 255.0f));
@@ -356,20 +295,11 @@ Status RunPipelineInternal(const Context& ctx,
         out.write(reinterpret_cast<const char*>(&b_byte), 1);
     }
     out.flush();
+
+    std::cout << "Forward stats: rays=" << forward.ray_count
+              << " samples=" << forward.sample_count
+              << " total_ms=" << forward.stats.total_ms << std::endl;
     return Status::Ok();
-}
-
-}  // namespace
-
-Status ParseConfigFile(const std::filesystem::path& path, RenderConfig& config) {
-    return ParseConfigInternal(path, config);
-}
-
-Status RunPipeline(const dvren::Context& ctx,
-                   const dvren::Plan& plan,
-                   const dvren::DenseGridField& field,
-                   const std::filesystem::path& output_path) {
-    return RunPipelineInternal(ctx, plan, field, output_path);
 }
 
 }  // namespace dvren::app
@@ -422,7 +352,7 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    Status run_status = dvren::app::RunPipeline(ctx, plan, field, config.output_path);
+    Status run_status = dvren::app::RenderToFile(ctx, plan, field, config.render_options, config.output_path);
     if (!run_status.ok()) {
         std::cerr << "Render failed: " << run_status.ToString() << std::endl;
         return 1;

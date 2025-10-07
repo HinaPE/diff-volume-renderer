@@ -55,12 +55,22 @@ target_include_directories(dvren_fields PUBLIC
 )
 target_link_libraries(dvren_fields PUBLIC dvren_core)
 
+add_library(dvren_renderer STATIC
+    src/render/renderer.cpp
+)
+add_library(dvren::render ALIAS dvren_renderer)
+target_include_directories(dvren_renderer PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
+)
+target_link_libraries(dvren_renderer PUBLIC dvren_fields)
+
 if (DVREN_BUILD_APPS)
     add_executable(dvren_render
         apps/dvren_render/main.cpp
     )
     target_include_directories(dvren_render PRIVATE third_party)
-    target_link_libraries(dvren_render PRIVATE dvren_fields)
+    target_link_libraries(dvren_render PRIVATE dvren::render)
 endif ()
 
 if (DVREN_BUILD_PROJECT_TESTS)
@@ -68,6 +78,6 @@ if (DVREN_BUILD_PROJECT_TESTS)
     add_executable(dvren_core_tests
         tests/core/test_core.cpp
     )
-    target_link_libraries(dvren_core_tests PRIVATE dvren_fields)
+    target_link_libraries(dvren_core_tests PRIVATE dvren::render)
     add_test(NAME dvren_core_tests COMMAND dvren_core_tests)
 endif ()
