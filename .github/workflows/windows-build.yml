@@ -27,22 +27,17 @@ jobs:
           arch: x64
 
       - name: Configure hotpath
-        run: |
-          cmake -S hotpath -B build-hotpath ^
-            -G "Ninja Multi-Config" ^
-            -DDVREN_BUILD_TESTS=ON ^
-            -DDVREN_BUILD_CPU=ON ^
-            -DDVREN_BUILD_CUDA=OFF
+        run: cmake -S hotpath -B build-hotpath -G Ninja -DCMAKE_BUILD_TYPE=${env:BUILD_TYPE} -DDVREN_BUILD_TESTS=ON -DDVREN_BUILD_CPU=ON -DDVREN_BUILD_CUDA=OFF
         shell: pwsh
 
       - name: Build hotpath runner
-        run: cmake --build build-hotpath --config $env:BUILD_TYPE --target hp_runner
+        run: cmake --build build-hotpath --target hp_runner --parallel
         shell: pwsh
 
       - name: Run hotpath tests
         run: |
           Set-StrictMode -Version Latest
-          .\build-hotpath\${{ env.BUILD_TYPE }}\hp_runner.exe | Tee-Object hp_runner.log
+          .\build-hotpath\hp_runner.exe | Tee-Object hp_runner.log
         shell: pwsh
 
   dvren:
@@ -64,25 +59,20 @@ jobs:
           arch: x64
 
       - name: Configure dvren
-        run: |
-          cmake -S . -B build ^
-            -G "Ninja Multi-Config" ^
-            -DDVREN_ENABLE_CUDA=OFF ^
-            -DDVREN_BUILD_PROJECT_TESTS=ON ^
-            -DDVREN_ENABLE_HOTPATH_TESTS=OFF
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=${env:BUILD_TYPE} -DDVREN_ENABLE_CUDA=OFF -DDVREN_BUILD_PROJECT_TESTS=ON -DDVREN_ENABLE_HOTPATH_TESTS=OFF
         shell: pwsh
 
       - name: Build dvren targets
-        run: cmake --build build --config $env:BUILD_TYPE --target dvren_core_tests dvren_render
+        run: cmake --build build --target dvren_core_tests dvren_render --parallel
         shell: pwsh
 
       - name: Run dvren tests
-        run: ctest --output-on-failure --test-dir build -C $env:BUILD_TYPE
+        run: ctest --output-on-failure --test-dir build
         shell: pwsh
 
       - name: Smoke CLI run
         run: |
           Set-StrictMode -Version Latest
-          .\build\${{ env.BUILD_TYPE }}\dvren_render.exe examples\simple_volume.json ci_output.ppm
+          .\build\dvren_render.exe examples\simple_volume.json ci_output.ppm
           Remove-Item ci_output.ppm
         shell: pwsh
