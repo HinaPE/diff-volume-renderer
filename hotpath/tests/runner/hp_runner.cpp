@@ -126,7 +126,9 @@ std::vector<std::string> default_cases() {
         "int_cpu_constant",
         "int_cpu_piecewise",
         "int_cpu_gaussian",
-        "int_cpu_early_stop"
+        "int_cpu_early_stop",
+        "img_cpu_basic",
+        "img_cpu_roi_background"
     };
 }
 
@@ -1328,6 +1330,397 @@ CaseResult test_int_cpu_early_stop(hp_ctx* ctx) {
         1.0f, 1.0f, 1.0f};
     return run_integration_case("int_cpu_early_stop", ctx, sigma, color, dt, 0.0f, 1.0f, true);
 }
+
+CaseResult test_img_cpu_basic(hp_ctx* ctx) {
+    CaseResult result{"img_cpu_basic", TestStatus::pass, ""};
+    hp_plan_desc plan_desc = make_basic_plan_desc(2, 2, 0.0f, 1.0f);
+    plan_desc.max_rays = 4;
+    plan_desc.max_samples = 16;
+    plan_desc.sampling.dt = 0.25f;
+    plan_desc.sampling.max_steps = 8;
+
+    hp_plan* plan = nullptr;
+    hp_status status = hp_plan_create(ctx, &plan_desc, &plan);
+    if (status != HP_STATUS_SUCCESS || plan == nullptr) {
+        result.status = TestStatus::fail;
+        result.message = std::string("hp_plan_create failed: ") + status_to_cstr(status);
+        return result;
+    }
+
+    std::array<std::byte, 4096> ray_ws{};
+    hp_rays_t rays{};
+    status = hp_ray(plan, nullptr, &rays, ray_ws.data(), ray_ws.size());
+    if (status != HP_STATUS_SUCCESS) {
+        result.status = TestStatus::fail;
+        result.message = std::string("hp_ray failed: ") + status_to_cstr(status);
+        hp_plan_release(plan);
+        return result;
+    }
+
+    std::vector<float> sigma_grid(8, 0.5f);
+    std::vector<float> color_grid{
+        0.4f, 0.1f, 0.2f,
+        0.4f, 0.1f, 0.2f,
+        0.4f, 0.1f, 0.2f,
+        0.4f, 0.1f, 0.2f,
+        0.4f, 0.1f, 0.2f,
+        0.4f, 0.1f, 0.2f,
+        0.4f, 0.1f, 0.2f,
+        0.4f, 0.1f, 0.2f};
+
+    hp_tensor sigma_tensor = make_tensor(sigma_grid.data(), HP_DTYPE_F32, {2, 2, 2});
+    hp_tensor color_tensor = make_tensor(color_grid.data(), HP_DTYPE_F32, {2, 2, 2, 3});
+
+    hp_field* fs = nullptr;
+    hp_field* fc = nullptr;
+    status = hp_field_create_grid_sigma(ctx, &sigma_tensor, HP_INTERP_LINEAR, HP_OOB_ZERO, &fs);
+    if (status != HP_STATUS_SUCCESS || fs == nullptr) {
+        result.status = TestStatus::fail;
+        result.message = std::string("hp_field_create_grid_sigma failed: ") + status_to_cstr(status);
+        hp_plan_release(plan);
+        return result;
+    }
+    status = hp_field_create_grid_color(ctx, &color_tensor, HP_INTERP_LINEAR, HP_OOB_ZERO, &fc);
+    if (status != HP_STATUS_SUCCESS || fc == nullptr) {
+        result.status = TestStatus::fail;
+        result.message = std::string("hp_field_create_grid_color failed: ") + status_to_cstr(status);
+        hp_field_release(fs);
+        hp_plan_release(plan);
+        return result;
+    }
+
+    std::array<std::byte, 8192> samp_ws{};
+    hp_samp_t samp{};
+    status = hp_samp(plan, fs, fc, &rays, &samp, samp_ws.data(), samp_ws.size());
+    if (status != HP_STATUS_SUCCESS) {
+        result.status = TestStatus::fail;
+        result.message = std::string("hp_samp failed: ") + status_to_cstr(status);
+        hp_field_release(fs);
+        hp_field_release(fc);
+        hp_plan_release(plan);
+        return result;
+    }
+
+    std::array<std::byte, 8192> intl_ws{};
+    hp_intl_t intl{};
+    status = hp_int(plan, &samp, &intl, intl_ws.data(), intl_ws.size());
+    if (status != HP_STATUS_SUCCESS) {
+        result.status = TestStatus::fail;
+        result.message = std::string("hp_int failed: ") + status_to_cstr(status);
+        hp_field_release(fs);
+        hp_field_release(fc);
+        hp_plan_release(plan);
+        return result;
+    }
+
+    const uint32_t* pixel_ids = static_cast<const uint32_t*>(rays.pixel_ids.data);
+    const float* radiance = static_cast<const float*>(intl.radiance.data);
+    const float* trans = static_cast<const float*>(intl.transmittance.data);
+    const float* depth = static_cast<const float*>(intl.depth.data);
+
+    const size_t width = plan_desc.width;
+    const size_t height = plan_desc.height;
+    const size_t pixel_count = width * height;
+    std::vector<float> expected_image(pixel_count * 3U, 0.0f);
+    std::vector<float> expected_trans(pixel_count, 1.0f);
+    std::vector<float> expected_depth(pixel_count, plan_desc.t_far);
+    std::vector<uint32_t> expected_hit(pixel_count, 0U);
+
+    const size_t ray_count = static_cast<size_t>(intl.transmittance.shape[0]);
+    for (size_t ray = 0; ray < ray_count; ++ray) {
+        const uint32_t pix = pixel_ids[ray];
+        if (pix >= pixel_count) {
+            result.status = TestStatus::fail;
+            result.message = "pixel id out of range";
+            hp_field_release(fs);
+            hp_field_release(fc);
+            hp_plan_release(plan);
+            return result;
+        }
+        const size_t base = pix * 3U;
+        expected_image[base + 0] += radiance[ray * 3U + 0];
+        expected_image[base + 1] += radiance[ray * 3U + 1];
+        expected_image[base + 2] += radiance[ray * 3U + 2];
+        expected_trans[pix] *= trans[ray];
+        expected_depth[pix] = std::min(expected_depth[pix], depth[ray]);
+        expected_hit[pix] = 1U;
+    }
+    std::vector<float> expected_opacity(pixel_count, 0.0f);
+    for (size_t i = 0; i < pixel_count; ++i) {
+        expected_opacity[i] = 1.0f - expected_trans[i];
+    }
+
+    std::array<std::byte, 8192> img_ws{};
+    hp_img_t img{};
+    status = hp_img(plan, &intl, &rays, &img, img_ws.data(), img_ws.size());
+    if (status != HP_STATUS_SUCCESS) {
+        result.status = TestStatus::fail;
+        result.message = std::string("hp_img failed: ") + status_to_cstr(status);
+        hp_field_release(fs);
+        hp_field_release(fc);
+        hp_plan_release(plan);
+        return result;
+    }
+
+    const float* image_out = static_cast<const float*>(img.image.data);
+    const float* trans_out = static_cast<const float*>(img.trans.data);
+    const float* opacity_out = static_cast<const float*>(img.opacity.data);
+    const float* depth_out = static_cast<const float*>(img.depth.data);
+    const uint32_t* hitmask_out = static_cast<const uint32_t*>(img.hitmask.data);
+
+    const float tol = 1e-5f;
+    for (size_t i = 0; i < expected_image.size(); ++i) {
+        if (std::fabs(image_out[i] - expected_image[i]) > tol) {
+            result.status = TestStatus::fail;
+            result.message = "image mismatch";
+            hp_field_release(fs);
+            hp_field_release(fc);
+            hp_plan_release(plan);
+            return result;
+        }
+    }
+    for (size_t i = 0; i < pixel_count; ++i) {
+        if (std::fabs(trans_out[i] - expected_trans[i]) > tol) {
+            result.status = TestStatus::fail;
+            result.message = "trans mismatch";
+            hp_field_release(fs);
+            hp_field_release(fc);
+            hp_plan_release(plan);
+            return result;
+        }
+        if (std::fabs(opacity_out[i] - expected_opacity[i]) > tol) {
+            result.status = TestStatus::fail;
+            result.message = "opacity mismatch";
+            hp_field_release(fs);
+            hp_field_release(fc);
+            hp_plan_release(plan);
+            return result;
+        }
+        if (std::fabs(depth_out[i] - expected_depth[i]) > 2e-4f) {
+            result.status = TestStatus::fail;
+            result.message = "depth mismatch";
+            hp_field_release(fs);
+            hp_field_release(fc);
+            hp_plan_release(plan);
+            return result;
+        }
+        if (hitmask_out[i] != expected_hit[i]) {
+            result.status = TestStatus::fail;
+            result.message = "hitmask mismatch";
+            hp_field_release(fs);
+            hp_field_release(fc);
+            hp_plan_release(plan);
+            return result;
+        }
+        if (std::fabs(opacity_out[i] - (1.0f - trans_out[i])) > tol) {
+            result.status = TestStatus::fail;
+            result.message = "opacity != 1 - trans";
+            hp_field_release(fs);
+            hp_field_release(fc);
+            hp_plan_release(plan);
+            return result;
+        }
+    }
+
+    hp_field_release(fs);
+    hp_field_release(fc);
+    hp_plan_release(plan);
+    return result;
+}
+
+CaseResult test_img_cpu_roi_background(hp_ctx* ctx) {
+    CaseResult result{"img_cpu_roi_background", TestStatus::pass, ""};
+    hp_plan_desc plan_desc = make_basic_plan_desc(2, 2, 0.0f, 1.0f);
+    plan_desc.roi.x = 1;
+    plan_desc.roi.y = 0;
+    plan_desc.roi.width = 1;
+    plan_desc.roi.height = 1;
+    plan_desc.max_rays = 1;
+    plan_desc.max_samples = 8;
+    plan_desc.sampling.dt = 0.5f;
+    plan_desc.sampling.max_steps = 4;
+
+    hp_plan* plan = nullptr;
+    hp_status status = hp_plan_create(ctx, &plan_desc, &plan);
+    if (status != HP_STATUS_SUCCESS || plan == nullptr) {
+        result.status = TestStatus::fail;
+        result.message = std::string("hp_plan_create failed: ") + status_to_cstr(status);
+        return result;
+    }
+
+    std::array<std::byte, 4096> ray_ws{};
+    hp_rays_t rays{};
+    status = hp_ray(plan, nullptr, &rays, ray_ws.data(), ray_ws.size());
+    if (status != HP_STATUS_SUCCESS) {
+        result.status = TestStatus::fail;
+        result.message = std::string("hp_ray failed: ") + status_to_cstr(status);
+        hp_plan_release(plan);
+        return result;
+    }
+
+    std::vector<float> sigma_grid(8, 1.0f);
+    std::vector<float> color_grid(24, 0.25f);
+    hp_tensor sigma_tensor = make_tensor(sigma_grid.data(), HP_DTYPE_F32, {2, 2, 2});
+    hp_tensor color_tensor = make_tensor(color_grid.data(), HP_DTYPE_F32, {2, 2, 2, 3});
+
+    hp_field* fs = nullptr;
+    hp_field* fc = nullptr;
+    status = hp_field_create_grid_sigma(ctx, &sigma_tensor, HP_INTERP_LINEAR, HP_OOB_ZERO, &fs);
+    if (status != HP_STATUS_SUCCESS || fs == nullptr) {
+        result.status = TestStatus::fail;
+        result.message = std::string("hp_field_create_grid_sigma failed: ") + status_to_cstr(status);
+        hp_plan_release(plan);
+        return result;
+    }
+    status = hp_field_create_grid_color(ctx, &color_tensor, HP_INTERP_LINEAR, HP_OOB_ZERO, &fc);
+    if (status != HP_STATUS_SUCCESS || fc == nullptr) {
+        result.status = TestStatus::fail;
+        result.message = std::string("hp_field_create_grid_color failed: ") + status_to_cstr(status);
+        hp_field_release(fs);
+        hp_plan_release(plan);
+        return result;
+    }
+
+    std::array<std::byte, 4096> samp_ws{};
+    hp_samp_t samp{};
+    status = hp_samp(plan, fs, fc, &rays, &samp, samp_ws.data(), samp_ws.size());
+    if (status != HP_STATUS_SUCCESS) {
+        result.status = TestStatus::fail;
+        result.message = std::string("hp_samp failed: ") + status_to_cstr(status);
+        hp_field_release(fs);
+        hp_field_release(fc);
+        hp_plan_release(plan);
+        return result;
+    }
+
+    std::array<std::byte, 4096> intl_ws{};
+    hp_intl_t intl{};
+    status = hp_int(plan, &samp, &intl, intl_ws.data(), intl_ws.size());
+    if (status != HP_STATUS_SUCCESS) {
+        result.status = TestStatus::fail;
+        result.message = std::string("hp_int failed: ") + status_to_cstr(status);
+        hp_field_release(fs);
+        hp_field_release(fc);
+        hp_plan_release(plan);
+        return result;
+    }
+
+    std::array<std::byte, 4096> img_ws{};
+    hp_img_t img{};
+    status = hp_img(plan, &intl, &rays, &img, img_ws.data(), img_ws.size());
+    if (status != HP_STATUS_SUCCESS) {
+        result.status = TestStatus::fail;
+        result.message = std::string("hp_img failed: ") + status_to_cstr(status);
+        hp_field_release(fs);
+        hp_field_release(fc);
+        hp_plan_release(plan);
+        return result;
+    }
+
+    const float* image_out = static_cast<const float*>(img.image.data);
+    const float* trans_out = static_cast<const float*>(img.trans.data);
+    const float* opacity_out = static_cast<const float*>(img.opacity.data);
+    const float* depth_out = static_cast<const float*>(img.depth.data);
+    const uint32_t* hitmask_out = static_cast<const uint32_t*>(img.hitmask.data);
+
+    const size_t width = plan_desc.width;
+    const size_t height = plan_desc.height;
+    const size_t pixel_count = width * height;
+    const uint32_t* pixel_ids = static_cast<const uint32_t*>(rays.pixel_ids.data);
+    const float* radiance = static_cast<const float*>(intl.radiance.data);
+    const float* trans = static_cast<const float*>(intl.transmittance.data);
+    const float* opacity = static_cast<const float*>(intl.opacity.data);
+    const float* depth = static_cast<const float*>(intl.depth.data);
+    const size_t ray_count = static_cast<size_t>(intl.transmittance.shape[0]);
+
+    std::vector<float> expected_image(pixel_count * 3U, 0.0f);
+    std::vector<float> expected_trans(pixel_count, 1.0f);
+    std::vector<float> expected_opacity(pixel_count, 0.0f);
+    std::vector<float> expected_depth(pixel_count, plan_desc.t_far);
+    std::vector<uint32_t> expected_hit(pixel_count, 0U);
+
+    for (size_t ray = 0; ray < ray_count; ++ray) {
+        const uint32_t pix = pixel_ids[ray];
+        if (pix >= pixel_count) {
+            result.status = TestStatus::fail;
+            result.message = "pixel id out of range";
+            hp_field_release(fs);
+            hp_field_release(fc);
+            hp_plan_release(plan);
+            return result;
+        }
+        const size_t base = pix * 3U;
+        expected_image[base + 0] += radiance[ray * 3U + 0];
+        expected_image[base + 1] += radiance[ray * 3U + 1];
+        expected_image[base + 2] += radiance[ray * 3U + 2];
+        expected_trans[pix] *= trans[ray];
+        expected_opacity[pix] = 1.0f - expected_trans[pix];
+        expected_depth[pix] = std::min(expected_depth[pix], depth[ray]);
+        expected_hit[pix] = 1U;
+    }
+
+    const float tol = 1e-5f;
+    for (size_t i = 0; i < pixel_count; ++i) {
+        const size_t base = i * 3U;
+        if (expected_hit[i] == 1U) {
+            if (std::fabs(image_out[base + 0] - expected_image[base + 0]) > tol ||
+                std::fabs(image_out[base + 1] - expected_image[base + 1]) > tol ||
+                std::fabs(image_out[base + 2] - expected_image[base + 2]) > tol) {
+                result.status = TestStatus::fail;
+                result.message = "img ROI color mismatch";
+                hp_field_release(fs);
+                hp_field_release(fc);
+                hp_plan_release(plan);
+                return result;
+            }
+            if (std::fabs(trans_out[i] - expected_trans[i]) > tol ||
+                std::fabs(opacity_out[i] - expected_opacity[i]) > tol ||
+                std::fabs(depth_out[i] - expected_depth[i]) > 2e-4f) {
+                result.status = TestStatus::fail;
+                result.message = "img ROI scalar mismatch";
+                hp_field_release(fs);
+                hp_field_release(fc);
+                hp_plan_release(plan);
+                return result;
+            }
+            if (hitmask_out[i] != 1U) {
+                result.status = TestStatus::fail;
+                result.message = "img ROI hitmask mismatch";
+                hp_field_release(fs);
+                hp_field_release(fc);
+                hp_plan_release(plan);
+                return result;
+            }
+        } else {
+            if (std::fabs(image_out[base + 0]) > tol ||
+                std::fabs(image_out[base + 1]) > tol ||
+                std::fabs(image_out[base + 2]) > tol) {
+                result.status = TestStatus::fail;
+                result.message = "background color non-zero";
+                hp_field_release(fs);
+                hp_field_release(fc);
+                hp_plan_release(plan);
+                return result;
+            }
+            if (std::fabs(trans_out[i] - 1.0f) > tol ||
+                std::fabs(opacity_out[i]) > tol ||
+                std::fabs(depth_out[i] - plan_desc.t_far) > tol ||
+                hitmask_out[i] != 0U) {
+                result.status = TestStatus::fail;
+                result.message = "background invariants failed";
+                hp_field_release(fs);
+                hp_field_release(fc);
+                hp_plan_release(plan);
+                return result;
+            }
+        }
+    }
+
+    hp_field_release(fs);
+    hp_field_release(fc);
+    hp_plan_release(plan);
+    return result;
+}
 using TestFn = CaseResult(*)(hp_ctx*);
 
 std::unordered_map<std::string, TestFn> build_registry() {
@@ -1342,7 +1735,9 @@ std::unordered_map<std::string, TestFn> build_registry() {
         {"int_cpu_constant", test_int_cpu_constant},
         {"int_cpu_piecewise", test_int_cpu_piecewise},
         {"int_cpu_gaussian", test_int_cpu_gaussian},
-        {"int_cpu_early_stop", test_int_cpu_early_stop}
+        {"int_cpu_early_stop", test_int_cpu_early_stop},
+        {"img_cpu_basic", test_img_cpu_basic},
+        {"img_cpu_roi_background", test_img_cpu_roi_background}
     };
 #if defined(HP_WITH_CUDA)
     registry.emplace("ray_cuda_basic", test_ray_cuda_basic);

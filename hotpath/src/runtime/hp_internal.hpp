@@ -78,6 +78,22 @@ hp_status int_generate_cuda(const hp_plan* plan,
                             size_t ws_bytes);
 #endif
 
+hp_status img_generate_cpu(const hp_plan* plan,
+                           const hp_intl_t* intl,
+                           const hp_rays_t* rays,
+                           hp_img_t* img,
+                           void* ws,
+                           size_t ws_bytes);
+
+#if defined(HP_WITH_CUDA)
+hp_status img_generate_cuda(const hp_plan* plan,
+                            const hp_intl_t* intl,
+                            const hp_rays_t* rays,
+                            hp_img_t* img,
+                            void* ws,
+                            size_t ws_bytes);
+#endif
+
 float sample_grid_sigma_cpu(const hp_field* field, const float pos[3], hp_status* status);
 void sample_grid_color_cpu(const hp_field* field, const float pos[3], float out_rgb[3], hp_status* status);
 

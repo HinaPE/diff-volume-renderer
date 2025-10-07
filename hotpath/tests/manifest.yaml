@@ -11,3 +11,5 @@ cases:
   - int_cpu_piecewise
   - int_cpu_gaussian
   - int_cpu_early_stop
+  - img_cpu_basic
+  - img_cpu_roi_background
