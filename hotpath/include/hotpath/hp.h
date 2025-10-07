@@ -189,6 +189,32 @@ HP_API hp_status hp_samp_int_fused(const hp_plan* plan,
                                    void* ws,
                                    size_t ws_bytes);
 
+#if defined(HP_WITH_CUDA)
+HP_API hp_status hp_graph_create(const hp_plan* plan,
+                                  const hp_field* fs,
+                                  const hp_field* fc,
+                                  size_t ws_ray_bytes,
+                                  size_t ws_fused_bytes,
+                                  size_t ws_img_bytes,
+                                  size_t ws_diff_bytes,
+                                  void** out_graph_handle);
+
+HP_API hp_status hp_graph_capture(void* graph_handle,
+                                   const hp_plan* plan,
+                                   const hp_field* fs,
+                                   const hp_field* fc,
+                                   const hp_tensor* dL_dI);
+
+HP_API hp_status hp_graph_execute(void* graph_handle,
+                                   hp_rays_t* out_rays,
+                                   hp_samp_t* out_samp,
+                                   hp_intl_t* out_intl,
+                                   hp_img_t* out_img,
+                                   hp_grads_t* out_grads);
+
+HP_API void hp_graph_release(void* graph_handle);
+#endif
+
 #ifdef __cplusplus
 }
 #endif

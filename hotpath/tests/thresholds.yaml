@@ -1,3 +1,5 @@
 thresholds:
   monotone_t_tol: 1.0e-4
   stratified_midpoint_tol: 1.0e-2
+  graph_cuda_max_latency_us: 100000.0
+  graph_cuda_determinism_tol: 1.0e-6

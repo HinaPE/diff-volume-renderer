@@ -45,6 +45,7 @@ if (DVREN_BUILD_CUDA)
         src/cuda/samp_int_fused.cu
         src/cuda/diff_cuda.cu
         src/cuda/hash_mlp_cuda.cu
+        src/cuda/graph_cuda.cu
     )
 endif ()
 

@@ -19,3 +19,6 @@ cases:
   - diff_cuda_determinism
   - hash_mlp_cpu_basic
   - hash_mlp_cpu_determinism
+  - graph_cuda_capture_execute
+  - graph_cuda_performance
+  - graph_cuda_determinism

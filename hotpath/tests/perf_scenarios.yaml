@@ -1,3 +1,5 @@
 perf:
   raygen_baseline_mrays: 0.0
   sampling_baseline_msamples: 0.0
+  graph_cuda_baseline_latency_us: 0.0
+  graph_cuda_speedup_vs_nongraph: 1.0
