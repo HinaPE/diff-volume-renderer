@@ -122,7 +122,11 @@ std::vector<std::string> default_cases() {
         "samp_cpu_basic",
         "samp_cpu_oob_zero",
         "samp_cpu_oob_clamp",
-        "samp_cpu_stratified_determinism"
+        "samp_cpu_stratified_determinism",
+        "int_cpu_constant",
+        "int_cpu_piecewise",
+        "int_cpu_gaussian",
+        "int_cpu_early_stop"
     };
 }
 
@@ -1023,6 +1027,307 @@ CaseResult test_samp_cpu_stratified(hp_ctx* ctx) {
     hp_plan_release(plan);
     return result;
 }
+
+float compute_alpha_ref(float sigma, float dt) {
+    const float optical = sigma * dt;
+    if (optical <= 0.0f) {
+        return 0.0f;
+    }
+    if (optical < 1e-4f) {
+        const float half = 0.5f * optical;
+        return optical * (1.0f - half);
+    }
+    const double alpha = -std::expm1(-static_cast<double>(optical));
+    return static_cast<float>(std::min(1.0, std::max(alpha, 0.0)));
+}
+
+hp_samp_t make_samp_view(std::vector<float>& positions,
+                         std::vector<float>& dt,
+                         std::vector<uint32_t>& offsets,
+                         std::vector<float>& sigma,
+                         std::vector<float>& color) {
+    hp_samp_t samp{};
+    const int64_t samples = static_cast<int64_t>(dt.size());
+    samp.positions.data = positions.data();
+    samp.positions.dtype = HP_DTYPE_F32;
+    samp.positions.memspace = HP_MEMSPACE_HOST;
+    samp.positions.rank = 2;
+    samp.positions.shape[0] = samples;
+    samp.positions.shape[1] = 3;
+    samp.positions.stride[1] = 1;
+    samp.positions.stride[0] = 3;
+
+    samp.dt.data = dt.data();
+    samp.dt.dtype = HP_DTYPE_F32;
+    samp.dt.memspace = HP_MEMSPACE_HOST;
+    samp.dt.rank = 1;
+    samp.dt.shape[0] = samples;
+    samp.dt.stride[0] = 1;
+
+    samp.ray_offset.data = offsets.data();
+    samp.ray_offset.dtype = HP_DTYPE_U32;
+    samp.ray_offset.memspace = HP_MEMSPACE_HOST;
+    samp.ray_offset.rank = 1;
+    samp.ray_offset.shape[0] = static_cast<int64_t>(offsets.size());
+    samp.ray_offset.stride[0] = 1;
+
+    samp.sigma.data = sigma.data();
+    samp.sigma.dtype = HP_DTYPE_F32;
+    samp.sigma.memspace = HP_MEMSPACE_HOST;
+    samp.sigma.rank = 1;
+    samp.sigma.shape[0] = samples;
+    samp.sigma.stride[0] = 1;
+
+    samp.color.data = color.data();
+    samp.color.dtype = HP_DTYPE_F32;
+    samp.color.memspace = HP_MEMSPACE_HOST;
+    samp.color.rank = 2;
+    samp.color.shape[0] = samples;
+    samp.color.shape[1] = 3;
+    samp.color.stride[1] = 1;
+    samp.color.stride[0] = 3;
+
+    return samp;
+}
+
+CaseResult run_integration_case(const char* name,
+                                hp_ctx* ctx,
+                                const std::vector<float>& sigma_vals,
+                                const std::vector<float>& color_vals,
+                                const std::vector<float>& dt_vals,
+                                float t_near,
+                                float t_far,
+                                bool expect_early_stop = false) {
+    CaseResult result{name, TestStatus::pass, ""};
+
+    if (sigma_vals.size() != dt_vals.size() || color_vals.size() != dt_vals.size() * 3U) {
+        result.status = TestStatus::fail;
+        result.message = "invalid test fixture";
+        return result;
+    }
+
+    hp_plan_desc plan_desc = make_basic_plan_desc(1, 1, t_near, t_far);
+    plan_desc.max_rays = 1;
+    plan_desc.max_samples = static_cast<uint32_t>(dt_vals.size());
+    plan_desc.sampling.max_steps = static_cast<uint32_t>(dt_vals.size());
+
+    hp_plan* plan = nullptr;
+    hp_status status = hp_plan_create(ctx, &plan_desc, &plan);
+    if (status != HP_STATUS_SUCCESS || plan == nullptr) {
+        result.status = TestStatus::fail;
+        result.message = std::string("hp_plan_create failed: ") + status_to_cstr(status);
+        return result;
+    }
+
+    std::vector<float> positions(dt_vals.size() * 3U, 0.0f);
+    std::vector<float> dt = dt_vals;
+    std::vector<float> sigma = sigma_vals;
+    std::vector<float> color = color_vals;
+    std::vector<uint32_t> offsets{0u, static_cast<uint32_t>(dt_vals.size())};
+
+    float t_cursor = t_near;
+    for (size_t i = 0; i < dt_vals.size(); ++i) {
+        const float t_mid = t_cursor + 0.5f * dt_vals[i];
+        positions[i * 3U + 2] = t_mid;
+        t_cursor += dt_vals[i];
+    }
+
+    hp_samp_t samp = make_samp_view(positions, dt, offsets, sigma, color);
+
+    std::array<std::byte, 8192> intl_ws{};
+    hp_intl_t intl{};
+    status = hp_int(plan, &samp, &intl, intl_ws.data(), intl_ws.size());
+    if (status != HP_STATUS_SUCCESS) {
+        result.status = TestStatus::fail;
+        result.message = std::string("hp_int failed: ") + status_to_cstr(status);
+        hp_plan_release(plan);
+        return result;
+    }
+
+    const float* radiance = static_cast<const float*>(intl.radiance.data);
+    const float* trans = static_cast<const float*>(intl.transmittance.data);
+    const float* opacity = static_cast<const float*>(intl.opacity.data);
+    const float* depth = static_cast<const float*>(intl.depth.data);
+    const float* aux = static_cast<const float*>(intl.aux.data);
+
+    if (radiance == nullptr || trans == nullptr || opacity == nullptr || depth == nullptr) {
+        result.status = TestStatus::fail;
+        result.message = "intl buffers missing";
+        hp_plan_release(plan);
+        return result;
+    }
+
+    const float stop_threshold = 1e-4f;
+    float T = 1.0f;
+    float depth_weighted = 0.0f;
+    float color_ref[3]{0.0f, 0.0f, 0.0f};
+    std::vector<float> alpha_ref(dt.size(), 0.0f);
+    std::vector<float> weight_ref(dt.size(), 0.0f);
+    std::vector<float> Tprev_ref(dt.size(), 0.0f);
+    std::vector<float> logTprev_ref(dt.size(), 0.0f);
+    float segment = t_near;
+    size_t processed = 0;
+    for (size_t i = 0; i < dt.size(); ++i) {
+        const float dt_val = dt[i];
+        const float sigma_val = sigma[i];
+        const float alpha = std::clamp(compute_alpha_ref(sigma_val, dt_val), 0.0f, 1.0f);
+        const float T_before = T;
+        const float weight = T_before * alpha;
+
+        alpha_ref[i] = alpha;
+        weight_ref[i] = weight;
+        Tprev_ref[i] = T_before;
+        logTprev_ref[i] = std::log(std::max(T_before, 1e-30f));
+
+        const float* col = color.data() + i * 3U;
+        color_ref[0] += weight * col[0];
+        color_ref[1] += weight * col[1];
+        color_ref[2] += weight * col[2];
+
+        const float t_mid = segment + 0.5f * dt_val;
+        depth_weighted += weight * t_mid;
+
+        T *= std::max(1.0f - alpha, 0.0f);
+        segment += dt_val;
+        ++processed;
+        if (T <= stop_threshold) {
+            break;
+        }
+    }
+
+    const float trans_ref = T;
+    const float opacity_ref = 1.0f - trans_ref;
+    const float depth_ref = (opacity_ref > 1e-6f) ? depth_weighted / opacity_ref : t_far;
+
+    const float tol = 1e-5f;
+    const float log_tol = 1e-5f;
+
+    for (int i = 0; i < 3; ++i) {
+        if (std::fabs(radiance[i] - color_ref[i]) > tol) {
+            result.status = TestStatus::fail;
+            result.message = "radiance mismatch";
+            hp_plan_release(plan);
+            return result;
+        }
+    }
+    if (std::fabs(trans[0] - trans_ref) > tol) {
+        result.status = TestStatus::fail;
+        result.message = "transmittance mismatch";
+        hp_plan_release(plan);
+        return result;
+    }
+    if (std::fabs(opacity[0] - opacity_ref) > tol) {
+        result.status = TestStatus::fail;
+        result.message = "opacity mismatch";
+        hp_plan_release(plan);
+        return result;
+    }
+    if (std::fabs(depth[0] - depth_ref) > 2e-4f) {
+        result.status = TestStatus::fail;
+        result.message = "depth mismatch";
+        hp_plan_release(plan);
+        return result;
+    }
+
+    if (aux != nullptr) {
+        for (size_t i = 0; i < dt.size(); ++i) {
+            const float alpha_val = aux[i * 4U + 0];
+            const float weight_val = aux[i * 4U + 1];
+            const float Tprev_val = aux[i * 4U + 2];
+            const float logTprev_val = aux[i * 4U + 3];
+
+            if (i < processed) {
+                if (std::fabs(alpha_val - alpha_ref[i]) > tol ||
+                    std::fabs(weight_val - weight_ref[i]) > tol ||
+                    std::fabs(Tprev_val - Tprev_ref[i]) > tol ||
+                    std::fabs(std::exp(logTprev_val) - Tprev_ref[i]) > 1e-4f ||
+                    std::fabs(logTprev_val - logTprev_ref[i]) > log_tol) {
+                    result.status = TestStatus::fail;
+                    result.message = "aux mismatch";
+                    hp_plan_release(plan);
+                    return result;
+                }
+            } else {
+                if (!expect_early_stop) {
+                    if (std::fabs(alpha_val) > tol || std::fabs(weight_val) > tol ||
+                        std::fabs(Tprev_val) > tol || std::fabs(logTprev_val) > tol) {
+                        result.status = TestStatus::fail;
+                        result.message = "aux should be zero";
+                        hp_plan_release(plan);
+                        return result;
+                    }
+                }
+            }
+        }
+    }
+
+    if (expect_early_stop && processed < dt.size()) {
+        if (trans_ref > 1e-3f) {
+            result.status = TestStatus::fail;
+            result.message = "early stop not triggered";
+            hp_plan_release(plan);
+            return result;
+        }
+    }
+
+    hp_plan_release(plan);
+    return result;
+}
+
+CaseResult test_int_cpu_constant(hp_ctx* ctx) {
+    const std::vector<float> dt{0.25f, 0.25f, 0.25f, 0.25f};
+    const std::vector<float> sigma{0.5f, 0.5f, 0.5f, 0.5f};
+    const std::vector<float> color{
+        0.8f, 0.6f, 0.4f,
+        0.8f, 0.6f, 0.4f,
+        0.8f, 0.6f, 0.4f,
+        0.8f, 0.6f, 0.4f};
+    return run_integration_case("int_cpu_constant", ctx, sigma, color, dt, 0.0f, 1.0f);
+}
+
+CaseResult test_int_cpu_piecewise(hp_ctx* ctx) {
+    const std::vector<float> dt{0.25f, 0.25f, 0.25f, 0.25f};
+    const std::vector<float> sigma{0.0f, 0.0f, 4.0f, 4.0f};
+    const std::vector<float> color{
+        0.0f, 0.0f, 0.0f,
+        0.0f, 0.0f, 0.0f,
+        0.0f, 1.0f, 0.0f,
+        0.0f, 1.0f, 0.0f};
+    return run_integration_case("int_cpu_piecewise", ctx, sigma, color, dt, 0.0f, 1.0f);
+}
+
+CaseResult test_int_cpu_gaussian(hp_ctx* ctx) {
+    const std::vector<float> dt{0.25f, 0.25f, 0.25f, 0.25f};
+    const float mu = 0.5f;
+    const float sigma_width = 0.2f;
+    const float amplitude = 1.5f;
+    std::vector<float> sigma_values;
+    sigma_values.reserve(dt.size());
+    float cursor = 0.0f;
+    for (float seg : dt) {
+        const float t_mid = cursor + 0.5f * seg;
+        const float x = (t_mid - mu) / sigma_width;
+        sigma_values.push_back(amplitude * std::exp(-0.5f * x * x));
+        cursor += seg;
+    }
+    const std::vector<float> color{
+        0.3f, 0.2f, 0.1f,
+        0.4f, 0.3f, 0.2f,
+        0.5f, 0.4f, 0.3f,
+        0.6f, 0.5f, 0.4f};
+    return run_integration_case("int_cpu_gaussian", ctx, sigma_values, color, dt, 0.0f, 1.0f);
+}
+
+CaseResult test_int_cpu_early_stop(hp_ctx* ctx) {
+    const std::vector<float> dt{0.25f, 0.25f, 0.25f, 0.25f};
+    const std::vector<float> sigma{100.0f, 0.5f, 0.5f, 0.5f};
+    const std::vector<float> color{
+        1.0f, 1.0f, 1.0f,
+        1.0f, 1.0f, 1.0f,
+        1.0f, 1.0f, 1.0f,
+        1.0f, 1.0f, 1.0f};
+    return run_integration_case("int_cpu_early_stop", ctx, sigma, color, dt, 0.0f, 1.0f, true);
+}
 using TestFn = CaseResult(*)(hp_ctx*);
 
 std::unordered_map<std::string, TestFn> build_registry() {
@@ -1033,7 +1338,11 @@ std::unordered_map<std::string, TestFn> build_registry() {
         {"samp_cpu_basic", test_samp_cpu_basic},
         {"samp_cpu_oob_zero", test_samp_cpu_oob_zero},
         {"samp_cpu_oob_clamp", test_samp_cpu_oob_clamp},
-        {"samp_cpu_stratified_determinism", test_samp_cpu_stratified}
+        {"samp_cpu_stratified_determinism", test_samp_cpu_stratified},
+        {"int_cpu_constant", test_int_cpu_constant},
+        {"int_cpu_piecewise", test_int_cpu_piecewise},
+        {"int_cpu_gaussian", test_int_cpu_gaussian},
+        {"int_cpu_early_stop", test_int_cpu_early_stop}
     };
 #if defined(HP_WITH_CUDA)
     registry.emplace("ray_cuda_basic", test_ray_cuda_basic);

@@ -184,8 +184,27 @@ HP_API hp_status hp_samp(const hp_plan* plan,
     return hp_internal::samp_generate_cpu(plan, fs, fc, rays, samp, ws, ws_bytes);
 }
 
-HP_API hp_status hp_int(const hp_plan*, const hp_samp_t*, hp_intl_t*, void*, size_t) {
-    return HP_STATUS_NOT_IMPLEMENTED;
+HP_API hp_status hp_int(const hp_plan* plan,
+                        const hp_samp_t* samp,
+                        hp_intl_t* intl,
+                        void* ws,
+                        size_t ws_bytes) {
+    if (plan == nullptr || samp == nullptr || intl == nullptr) {
+        return HP_STATUS_INVALID_ARGUMENT;
+    }
+
+    const hp_memspace memspace = samp->sigma.memspace;
+    if (memspace == HP_MEMSPACE_DEVICE) {
+#if defined(HP_WITH_CUDA)
+        return hp_internal::int_generate_cuda(plan, samp, intl, ws, ws_bytes);
+#else
+        (void)ws;
+        (void)ws_bytes;
+        return HP_STATUS_UNSUPPORTED;
+#endif
+    }
+
+    return hp_internal::int_generate_cpu(plan, samp, intl, ws, ws_bytes);
 }
 
 HP_API hp_status hp_img(const hp_plan*, const hp_intl_t*, const hp_rays_t*, hp_img_t*, void*, size_t) {

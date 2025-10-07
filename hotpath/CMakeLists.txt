@@ -29,12 +29,14 @@ set(DVREN_HP_CORE_SOURCES
     src/runtime/api_ray.cpp
     src/cpu/ray_cpu.cpp
     src/cpu/samp_cpu.cpp
+    src/cpu/int_cpu.cpp
     src/cpu/grid_dense_cpu.cpp
 )
 
 if (DVREN_BUILD_CUDA)
     list(APPEND DVREN_HP_CORE_SOURCES
         src/cuda/ray_cuda.cu
+        src/cuda/int_cuda.cu
     )
 endif ()
 

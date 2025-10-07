@@ -7,3 +7,7 @@ cases:
   - samp_cpu_oob_zero
   - samp_cpu_oob_clamp
   - samp_cpu_stratified_determinism
+  - int_cpu_constant
+  - int_cpu_piecewise
+  - int_cpu_gaussian
+  - int_cpu_early_stop
