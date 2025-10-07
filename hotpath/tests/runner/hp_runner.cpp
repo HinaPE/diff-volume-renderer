@@ -128,7 +128,8 @@ std::vector<std::string> default_cases() {
         "int_cpu_gaussian",
         "int_cpu_early_stop",
         "img_cpu_basic",
-        "img_cpu_roi_background"
+        "img_cpu_roi_background",
+        "fused_cpu_equivalence"
     };
 }
 
@@ -1331,6 +1332,71 @@ CaseResult test_int_cpu_early_stop(hp_ctx* ctx) {
     return run_integration_case("int_cpu_early_stop", ctx, sigma, color, dt, 0.0f, 1.0f, true);
 }
 
+struct SampSnapshot {
+    std::vector<float> positions;
+    std::vector<float> dt;
+    std::vector<uint32_t> offsets;
+    std::vector<float> sigma;
+    std::vector<float> color;
+};
+
+struct IntlSnapshot {
+    std::vector<float> radiance;
+    std::vector<float> trans;
+    std::vector<float> opacity;
+    std::vector<float> depth;
+};
+
+SampSnapshot capture_samp(const hp_samp_t& samp) {
+    SampSnapshot snap{};
+    const size_t samples = (samp.dt.rank >= 1) ? static_cast<size_t>(samp.dt.shape[0]) : 0;
+    const size_t rays = (samp.ray_offset.rank >= 1) ? static_cast<size_t>(samp.ray_offset.shape[0]) : 0;
+
+    if (samples > 0) {
+        snap.dt.assign(static_cast<const float*>(samp.dt.data), static_cast<const float*>(samp.dt.data) + samples);
+        snap.sigma.assign(static_cast<const float*>(samp.sigma.data), static_cast<const float*>(samp.sigma.data) + samples);
+        snap.positions.assign(static_cast<const float*>(samp.positions.data), static_cast<const float*>(samp.positions.data) + samples * 3U);
+        snap.color.assign(static_cast<const float*>(samp.color.data), static_cast<const float*>(samp.color.data) + samples * 3U);
+    }
+    if (rays > 0) {
+        snap.offsets.assign(static_cast<const uint32_t*>(samp.ray_offset.data), static_cast<const uint32_t*>(samp.ray_offset.data) + rays);
+    }
+    return snap;
+}
+
+IntlSnapshot capture_intl(const hp_intl_t& intl) {
+    IntlSnapshot snap{};
+    const size_t rays = (intl.transmittance.rank >= 1) ? static_cast<size_t>(intl.transmittance.shape[0]) : 0;
+    if (rays > 0) {
+        snap.radiance.assign(static_cast<const float*>(intl.radiance.data), static_cast<const float*>(intl.radiance.data) + rays * 3U);
+        snap.trans.assign(static_cast<const float*>(intl.transmittance.data), static_cast<const float*>(intl.transmittance.data) + rays);
+        snap.opacity.assign(static_cast<const float*>(intl.opacity.data), static_cast<const float*>(intl.opacity.data) + rays);
+        snap.depth.assign(static_cast<const float*>(intl.depth.data), static_cast<const float*>(intl.depth.data) + rays);
+    }
+    return snap;
+}
+
+void restore_samp(const SampSnapshot& snap, hp_samp_t* samp) {
+    if (samp == nullptr) {
+        return;
+    }
+    if (!snap.dt.empty() && samp->dt.data != nullptr) {
+        std::memcpy(samp->dt.data, snap.dt.data(), snap.dt.size() * sizeof(float));
+    }
+    if (!snap.sigma.empty() && samp->sigma.data != nullptr) {
+        std::memcpy(samp->sigma.data, snap.sigma.data(), snap.sigma.size() * sizeof(float));
+    }
+    if (!snap.positions.empty() && samp->positions.data != nullptr) {
+        std::memcpy(samp->positions.data, snap.positions.data(), snap.positions.size() * sizeof(float));
+    }
+    if (!snap.color.empty() && samp->color.data != nullptr) {
+        std::memcpy(samp->color.data, snap.color.data(), snap.color.size() * sizeof(float));
+    }
+    if (!snap.offsets.empty() && samp->ray_offset.data != nullptr) {
+        std::memcpy(samp->ray_offset.data, snap.offsets.data(), snap.offsets.size() * sizeof(uint32_t));
+    }
+}
+
 CaseResult test_img_cpu_basic(hp_ctx* ctx) {
     CaseResult result{"img_cpu_basic", TestStatus::pass, ""};
     hp_plan_desc plan_desc = make_basic_plan_desc(2, 2, 0.0f, 1.0f);
@@ -1721,6 +1787,139 @@ CaseResult test_img_cpu_roi_background(hp_ctx* ctx) {
     hp_plan_release(plan);
     return result;
 }
+
+CaseResult test_fused_cpu_equivalence(hp_ctx* ctx) {
+    CaseResult result{"fused_cpu_equivalence", TestStatus::pass, ""};
+    hp_plan_desc plan_desc = make_basic_plan_desc(2, 2, 0.0f, 1.0f);
+    plan_desc.max_rays = 4;
+    plan_desc.max_samples = 32;
+    plan_desc.sampling.dt = 0.25f;
+    plan_desc.sampling.max_steps = 8;
+
+    hp_plan* plan = nullptr;
+    hp_status status = hp_plan_create(ctx, &plan_desc, &plan);
+    if (status != HP_STATUS_SUCCESS || plan == nullptr) {
+        result.status = TestStatus::fail;
+        result.message = std::string("hp_plan_create failed: ") + status_to_cstr(status);
+        return result;
+    }
+
+    std::array<std::byte, 4096> ray_ws{};
+    hp_rays_t rays{};
+    status = hp_ray(plan, nullptr, &rays, ray_ws.data(), ray_ws.size());
+    if (status != HP_STATUS_SUCCESS) {
+        result.status = TestStatus::fail;
+        result.message = std::string("hp_ray failed: ") + status_to_cstr(status);
+        hp_plan_release(plan);
+        return result;
+    }
+
+    std::vector<float> sigma_grid(8, 0.75f);
+    std::vector<float> color_grid{
+        0.2f, 0.3f, 0.4f,
+        0.5f, 0.2f, 0.1f,
+        0.1f, 0.4f, 0.6f,
+        0.3f, 0.3f, 0.3f,
+        0.6f, 0.5f, 0.4f,
+        0.2f, 0.7f, 0.1f,
+        0.4f, 0.1f, 0.2f,
+        0.8f, 0.2f, 0.3f};
+
+    hp_tensor sigma_tensor = make_tensor(sigma_grid.data(), HP_DTYPE_F32, {2, 2, 2});
+    hp_tensor color_tensor = make_tensor(color_grid.data(), HP_DTYPE_F32, {2, 2, 2, 3});
+
+    hp_field* fs = nullptr;
+    hp_field* fc = nullptr;
+    status = hp_field_create_grid_sigma(ctx, &sigma_tensor, HP_INTERP_LINEAR, HP_OOB_ZERO, &fs);
+    if (status != HP_STATUS_SUCCESS || fs == nullptr) {
+        result.status = TestStatus::fail;
+        result.message = std::string("hp_field_create_grid_sigma failed: ") + status_to_cstr(status);
+        hp_plan_release(plan);
+        return result;
+    }
+    status = hp_field_create_grid_color(ctx, &color_tensor, HP_INTERP_LINEAR, HP_OOB_ZERO, &fc);
+    if (status != HP_STATUS_SUCCESS || fc == nullptr) {
+        result.status = TestStatus::fail;
+        result.message = std::string("hp_field_create_grid_color failed: ") + status_to_cstr(status);
+        hp_field_release(fs);
+        hp_plan_release(plan);
+        return result;
+    }
+
+    // Sequential path
+    hp_samp_t samp_seq{};
+    hp_intl_t intl_seq{};
+    std::array<std::byte, 8192> samp_ws{};
+    std::array<std::byte, 8192> intl_ws{};
+    status = hp_samp(plan, fs, fc, &rays, &samp_seq, samp_ws.data(), samp_ws.size());
+    if (status != HP_STATUS_SUCCESS) {
+        result.status = TestStatus::fail;
+        result.message = std::string("hp_samp seq failed: ") + status_to_cstr(status);
+        hp_field_release(fs);
+        hp_field_release(fc);
+        hp_plan_release(plan);
+        return result;
+    }
+    status = hp_int(plan, &samp_seq, &intl_seq, intl_ws.data(), intl_ws.size());
+    if (status != HP_STATUS_SUCCESS) {
+        result.status = TestStatus::fail;
+        result.message = std::string("hp_int seq failed: ") + status_to_cstr(status);
+        hp_field_release(fs);
+        hp_field_release(fc);
+        hp_plan_release(plan);
+        return result;
+    }
+
+    SampSnapshot seq_samp = capture_samp(samp_seq);
+    IntlSnapshot seq_intl = capture_intl(intl_seq);
+
+    // Fused path
+    hp_samp_t samp_fused{};
+    hp_intl_t intl_fused{};
+    std::array<std::byte, 16384> fused_ws{};
+    status = hp_samp_int_fused(plan, fs, fc, &rays, &samp_fused, &intl_fused, fused_ws.data(), fused_ws.size());
+    if (status != HP_STATUS_SUCCESS) {
+        result.status = TestStatus::fail;
+        result.message = std::string("hp_samp_int_fused failed: ") + status_to_cstr(status);
+        hp_field_release(fs);
+        hp_field_release(fc);
+        hp_plan_release(plan);
+        return result;
+    }
+
+    SampSnapshot fused_samp = capture_samp(samp_fused);
+    IntlSnapshot fused_intl = capture_intl(intl_fused);
+
+    if (seq_samp.positions != fused_samp.positions ||
+        seq_samp.dt != fused_samp.dt ||
+        seq_samp.sigma != fused_samp.sigma ||
+        seq_samp.color != fused_samp.color ||
+        seq_samp.offsets != fused_samp.offsets) {
+        result.status = TestStatus::fail;
+        result.message = "fused sampling mismatch";
+        hp_field_release(fs);
+        hp_field_release(fc);
+        hp_plan_release(plan);
+        return result;
+    }
+
+    if (seq_intl.radiance != fused_intl.radiance ||
+        seq_intl.trans != fused_intl.trans ||
+        seq_intl.opacity != fused_intl.opacity ||
+        seq_intl.depth != fused_intl.depth) {
+        result.status = TestStatus::fail;
+        result.message = "fused integration mismatch";
+        hp_field_release(fs);
+        hp_field_release(fc);
+        hp_plan_release(plan);
+        return result;
+    }
+
+    hp_field_release(fs);
+    hp_field_release(fc);
+    hp_plan_release(plan);
+    return result;
+}
 using TestFn = CaseResult(*)(hp_ctx*);
 
 std::unordered_map<std::string, TestFn> build_registry() {
@@ -1737,7 +1936,8 @@ std::unordered_map<std::string, TestFn> build_registry() {
         {"int_cpu_gaussian", test_int_cpu_gaussian},
         {"int_cpu_early_stop", test_int_cpu_early_stop},
         {"img_cpu_basic", test_img_cpu_basic},
-        {"img_cpu_roi_background", test_img_cpu_roi_background}
+        {"img_cpu_roi_background", test_img_cpu_roi_background},
+        {"fused_cpu_equivalence", test_fused_cpu_equivalence}
     };
 #if defined(HP_WITH_CUDA)
     registry.emplace("ray_cuda_basic", test_ray_cuda_basic);

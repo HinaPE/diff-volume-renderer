@@ -180,6 +180,15 @@ HP_API hp_status hp_field_create_grid_color(const hp_ctx* ctx, const hp_tensor* 
 HP_API hp_status hp_field_create_hash_mlp(const hp_ctx* ctx, const hp_tensor* params, hp_field** out_field);
 HP_API void hp_field_release(hp_field* field);
 
+HP_API hp_status hp_samp_int_fused(const hp_plan* plan,
+                                   const hp_field* fs,
+                                   const hp_field* fc,
+                                   const hp_rays_t* rays,
+                                   hp_samp_t* samp,
+                                   hp_intl_t* intl,
+                                   void* ws,
+                                   size_t ws_bytes);
+
 #ifdef __cplusplus
 }
 #endif

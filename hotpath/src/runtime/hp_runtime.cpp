@@ -330,4 +330,30 @@ HP_API void hp_field_release(hp_field* field) {
     delete field;
 }
 
+HP_API hp_status hp_samp_int_fused(const hp_plan* plan,
+                                   const hp_field* fs,
+                                   const hp_field* fc,
+                                   const hp_rays_t* rays,
+                                   hp_samp_t* samp,
+                                   hp_intl_t* intl,
+                                   void* ws,
+                                   size_t ws_bytes) {
+    if (plan == nullptr || rays == nullptr || samp == nullptr || intl == nullptr) {
+        return HP_STATUS_INVALID_ARGUMENT;
+    }
+
+    const hp_memspace memspace = rays->origins.memspace;
+    if (memspace == HP_MEMSPACE_DEVICE) {
+#if defined(HP_WITH_CUDA)
+        return hp_internal::samp_int_fused_cuda(plan, fs, fc, rays, samp, intl, ws, ws_bytes);
+#else
+        (void)ws;
+        (void)ws_bytes;
+        return HP_STATUS_UNSUPPORTED;
+#endif
+    }
+
+    return hp_internal::samp_int_fused_cpu(plan, fs, fc, rays, samp, intl, ws, ws_bytes);
+}
+
 }  // extern "C"
