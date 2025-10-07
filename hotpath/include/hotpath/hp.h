@@ -49,6 +49,11 @@ typedef enum hp_dtype {
     HP_DTYPE_U32 = 4
 } hp_dtype;
 
+typedef enum hp_camera_model {
+    HP_CAMERA_PINHOLE = 0,
+    HP_CAMERA_ORTHOGRAPHIC = 1
+} hp_camera_model;
+
 typedef struct hp_tensor {
     void* data;
     hp_dtype dtype;
@@ -64,6 +69,20 @@ typedef struct hp_ctx_desc {
     const void* reserved;
 } hp_ctx_desc;
 
+typedef struct hp_camera_desc {
+    hp_camera_model model;
+    float K[9];
+    float c2w[12];
+    float ortho_scale;
+} hp_camera_desc;
+
+typedef struct hp_roi_desc {
+    uint32_t x;
+    uint32_t y;
+    uint32_t width;
+    uint32_t height;
+} hp_roi_desc;
+
 typedef struct hp_plan_desc {
     uint32_t width;
     uint32_t height;
@@ -71,6 +90,9 @@ typedef struct hp_plan_desc {
     float t_far;
     uint32_t max_rays;
     uint32_t max_samples;
+    uint64_t seed;
+    hp_camera_desc camera;
+    hp_roi_desc roi;
 } hp_plan_desc;
 
 typedef struct hp_ctx hp_ctx;
@@ -147,4 +169,3 @@ HP_API hp_status hp_runner_run(const hp_ctx* ctx, const hp_runner_options* optio
 #ifdef __cplusplus
 }
 #endif
-

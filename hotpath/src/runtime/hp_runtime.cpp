@@ -1,30 +1,12 @@
 #include "hotpath/hp.h"
+#include "hp_internal.hpp"
 
+#include <climits>
+#include <algorithm>
 #include <iostream>
 #include <new>
 
 extern "C" {
-
-struct hp_ctx {
-    hp_ctx_desc desc{};
-    hp_version version{HP_VERSION_MAJOR, HP_VERSION_MINOR, HP_VERSION_PATCH};
-};
-
-struct hp_plan {
-    hp_plan_desc desc{};
-    const hp_ctx* ctx{};
-};
-
-enum class hp_field_kind : uint32_t {
-    dense_sigma = 0,
-    dense_color = 1,
-    hash_mlp = 2
-};
-
-struct hp_field {
-    hp_field_kind kind{hp_field_kind::dense_sigma};
-    hp_tensor source{};
-};
 
 HP_API hp_version hp_get_version(void) {
     return hp_version{HP_VERSION_MAJOR, HP_VERSION_MINOR, HP_VERSION_PATCH};
@@ -74,6 +56,66 @@ HP_API hp_status hp_plan_create(const hp_ctx* ctx, const hp_plan_desc* desc, hp_
         delete plan;
         return HP_STATUS_INVALID_ARGUMENT;
     }
+    if (!(plan->desc.t_far > plan->desc.t_near)) {
+        delete plan;
+        return HP_STATUS_INVALID_ARGUMENT;
+    }
+
+    hp_camera_desc cam = plan->desc.camera;
+    if (cam.model != HP_CAMERA_PINHOLE && cam.model != HP_CAMERA_ORTHOGRAPHIC) {
+        cam.model = HP_CAMERA_PINHOLE;
+    }
+    const bool K_is_zero =
+        cam.K[0] == 0.0f && cam.K[1] == 0.0f && cam.K[2] == 0.0f &&
+        cam.K[3] == 0.0f && cam.K[4] == 0.0f && cam.K[5] == 0.0f &&
+        cam.K[6] == 0.0f && cam.K[7] == 0.0f && cam.K[8] == 0.0f;
+    if (K_is_zero) {
+        cam.K[0] = 1.0f;
+        cam.K[4] = 1.0f;
+        cam.K[8] = 1.0f;
+        cam.K[2] = static_cast<float>(plan->desc.width) * 0.5f;
+        cam.K[5] = static_cast<float>(plan->desc.height) * 0.5f;
+    }
+    if (cam.K[0] == 0.0f) {
+        cam.K[0] = 1.0f;
+    }
+    if (cam.K[4] == 0.0f) {
+        cam.K[4] = 1.0f;
+    }
+    const bool c2w_is_zero =
+        cam.c2w[0] == 0.0f && cam.c2w[1] == 0.0f && cam.c2w[2] == 0.0f && cam.c2w[3] == 0.0f &&
+        cam.c2w[4] == 0.0f && cam.c2w[5] == 0.0f && cam.c2w[6] == 0.0f && cam.c2w[7] == 0.0f &&
+        cam.c2w[8] == 0.0f && cam.c2w[9] == 0.0f && cam.c2w[10] == 0.0f && cam.c2w[11] == 0.0f;
+    if (c2w_is_zero) {
+        cam.c2w[0] = 1.0f;
+        cam.c2w[5] = 1.0f;
+        cam.c2w[10] = 1.0f;
+    }
+    if (cam.model == HP_CAMERA_ORTHOGRAPHIC && cam.ortho_scale <= 0.0f) {
+        cam.ortho_scale = 1.0f;
+    }
+    plan->desc.camera = cam;
+
+    hp_roi_desc roi = plan->desc.roi;
+    if (roi.width == 0 || roi.height == 0) {
+        roi.x = 0;
+        roi.y = 0;
+        roi.width = plan->desc.width;
+        roi.height = plan->desc.height;
+    }
+    if (roi.x + roi.width > plan->desc.width || roi.y + roi.height > plan->desc.height) {
+        delete plan;
+        return HP_STATUS_INVALID_ARGUMENT;
+    }
+    plan->desc.roi = roi;
+    const uint64_t roi_rays = static_cast<uint64_t>(roi.width) * static_cast<uint64_t>(roi.height);
+    if (plan->desc.max_rays == 0U) {
+        plan->desc.max_rays = static_cast<uint32_t>(std::min<uint64_t>(roi_rays, static_cast<uint64_t>(UINT32_MAX)));
+    }
+    if (roi_rays > plan->desc.max_rays) {
+        delete plan;
+        return HP_STATUS_INVALID_ARGUMENT;
+    }
     *out_plan = plan;
     return HP_STATUS_SUCCESS;
 }
@@ -88,10 +130,6 @@ HP_API hp_status hp_plan_get_desc(const hp_plan* plan, hp_plan_desc* out_desc) {
     }
     *out_desc = plan->desc;
     return HP_STATUS_SUCCESS;
-}
-
-HP_API hp_status hp_ray(const hp_plan*, const hp_rays_t*, hp_rays_t*, void*, size_t) {
-    return HP_STATUS_NOT_IMPLEMENTED;
 }
 
 HP_API hp_status hp_samp(const hp_plan*, const hp_field*, const hp_field*, const hp_rays_t*, hp_samp_t*, void*, size_t) {

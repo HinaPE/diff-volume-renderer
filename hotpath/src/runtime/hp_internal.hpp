@@ -1,0 +1,45 @@
+#pragma once
+
+#include "hotpath/hp.h"
+
+#include <cstddef>
+#include <cstdint>
+
+struct hp_ctx {
+    hp_ctx_desc desc{};
+    hp_version version{HP_VERSION_MAJOR, HP_VERSION_MINOR, HP_VERSION_PATCH};
+};
+
+struct hp_plan {
+    hp_plan_desc desc{};
+    const hp_ctx* ctx{};
+};
+
+enum class hp_field_kind : uint32_t {
+    dense_sigma = 0u,
+    dense_color = 1u,
+    hash_mlp = 2u
+};
+
+struct hp_field {
+    hp_field_kind kind{hp_field_kind::dense_sigma};
+    hp_tensor source{};
+};
+
+namespace hp_internal {
+
+hp_status ray_generate_cpu(const hp_plan* plan,
+                           const hp_rays_t* override_or_null,
+                           hp_rays_t* rays,
+                           void* ws,
+                           size_t ws_bytes);
+
+#if defined(HP_WITH_CUDA)
+hp_status ray_generate_cuda(const hp_plan* plan,
+                            const hp_rays_t* override_or_null,
+                            hp_rays_t* rays,
+                            void* ws,
+                            size_t ws_bytes);
+#endif
+
+}  // namespace hp_internal
