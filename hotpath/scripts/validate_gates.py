@@ -274,11 +274,16 @@ class GateValidator:
 
 
 def main():
+    # Default to looking for benchmark results in standard location
     if len(sys.argv) < 2:
-        print("Usage: validate_gates.py <benchmark_results.json>")
-        sys.exit(1)
-
-    results_file = Path(sys.argv[1])
+        results_file = Path("profiling_output/benchmark_results.json")
+        if not results_file.exists():
+            print("Usage: validate_gates.py [benchmark_results.json]")
+            print(f"Default location not found: {results_file}")
+            print("\nRun profile.py first to generate benchmark results.")
+            sys.exit(1)
+    else:
+        results_file = Path(sys.argv[1])
 
     if not results_file.exists():
         print(f"Error: Results file not found: {results_file}")
@@ -301,4 +306,3 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
-

@@ -26,7 +26,7 @@ def parse_test_output(output_file: Path) -> dict:
         return {"error": str(e)}
 
 
-def check_ci_gates(scoreboard: dict) -> tuple[bool, list[str]]:
+def check_ci_gates(scoreboard: dict) -> bool:
     """Check all CI gates and return pass/fail with messages."""
     messages = []
     passed = True
@@ -120,4 +120,3 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
-
