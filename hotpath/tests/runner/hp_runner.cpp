@@ -12,6 +12,7 @@
 #include <iostream>
 #include <limits>
 #include <sstream>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -129,7 +130,8 @@ std::vector<std::string> default_cases() {
         "int_cpu_early_stop",
         "img_cpu_basic",
         "img_cpu_roi_background",
-        "fused_cpu_equivalence"
+        "fused_cpu_equivalence",
+        "diff_cpu_sigma_color"
     };
 }
 
@@ -1920,6 +1922,204 @@ CaseResult test_fused_cpu_equivalence(hp_ctx* ctx) {
     hp_plan_release(plan);
     return result;
 }
+
+CaseResult test_diff_cpu_sigma_color(hp_ctx* ctx) {
+    CaseResult result{"diff_cpu_sigma_color", TestStatus::pass, ""};
+    hp_plan_desc plan_desc = make_basic_plan_desc(1, 1, 0.0f, 1.0f);
+    plan_desc.max_rays = 1;
+    plan_desc.max_samples = 4;
+    plan_desc.sampling.dt = 0.25f;
+    plan_desc.sampling.max_steps = 4;
+
+    hp_plan* plan = nullptr;
+    hp_status status = hp_plan_create(ctx, &plan_desc, &plan);
+    if (status != HP_STATUS_SUCCESS || plan == nullptr) {
+        result.status = TestStatus::fail;
+        result.message = std::string("hp_plan_create failed: ") + status_to_cstr(status);
+        return result;
+    }
+
+    std::array<std::byte, 4096> ray_ws{};
+    hp_rays_t rays{};
+    status = hp_ray(plan, nullptr, &rays, ray_ws.data(), ray_ws.size());
+    if (status != HP_STATUS_SUCCESS) {
+        result.status = TestStatus::fail;
+        result.message = std::string("hp_ray failed: ") + status_to_cstr(status);
+        hp_plan_release(plan);
+        return result;
+    }
+
+    std::vector<float> sigma_grid{0.6f, 0.8f, 0.7f, 0.5f};
+    std::vector<float> color_grid{
+        0.3f, 0.4f, 0.5f,
+        0.6f, 0.2f, 0.1f,
+        0.4f, 0.5f, 0.2f,
+        0.2f, 0.3f, 0.7f,
+        0.5f, 0.4f, 0.6f,
+        0.1f, 0.2f, 0.3f,
+        0.7f, 0.5f, 0.1f,
+        0.6f, 0.6f, 0.2f};
+
+    hp_tensor sigma_tensor = make_tensor(sigma_grid.data(), HP_DTYPE_F32, {2, 2, 1});
+    hp_tensor color_tensor = make_tensor(color_grid.data(), HP_DTYPE_F32, {2, 2, 2, 3});
+
+    hp_field* fs = nullptr;
+    hp_field* fc = nullptr;
+    status = hp_field_create_grid_sigma(ctx, &sigma_tensor, HP_INTERP_LINEAR, HP_OOB_ZERO, &fs);
+    if (status != HP_STATUS_SUCCESS || fs == nullptr) {
+        result.status = TestStatus::fail;
+        result.message = std::string("hp_field_create_grid_sigma failed: ") + status_to_cstr(status);
+        hp_plan_release(plan);
+        return result;
+    }
+    status = hp_field_create_grid_color(ctx, &color_tensor, HP_INTERP_LINEAR, HP_OOB_ZERO, &fc);
+    if (status != HP_STATUS_SUCCESS || fc == nullptr) {
+        result.status = TestStatus::fail;
+        result.message = std::string("hp_field_create_grid_color failed: ") + status_to_cstr(status);
+        hp_field_release(fs);
+        hp_plan_release(plan);
+        return result;
+    }
+
+    std::array<std::byte, 8192> samp_ws{};
+    hp_samp_t samp{};
+    status = hp_samp(plan, fs, fc, &rays, &samp, samp_ws.data(), samp_ws.size());
+    if (status != HP_STATUS_SUCCESS) {
+        result.status = TestStatus::fail;
+        result.message = std::string("hp_samp failed: ") + status_to_cstr(status);
+        hp_field_release(fs);
+        hp_field_release(fc);
+        hp_plan_release(plan);
+        return result;
+    }
+
+    std::array<std::byte, 8192> intl_ws{};
+    hp_intl_t intl{};
+    status = hp_int(plan, &samp, &intl, intl_ws.data(), intl_ws.size());
+    if (status != HP_STATUS_SUCCESS) {
+        result.status = TestStatus::fail;
+        result.message = std::string("hp_int failed: ") + status_to_cstr(status);
+        hp_field_release(fs);
+        hp_field_release(fc);
+        hp_plan_release(plan);
+        return result;
+    }
+
+    const size_t ray_count = static_cast<size_t>(intl.transmittance.shape[0]);
+    std::vector<float> grad_image(ray_count * 3U, 1.0f);
+    hp_tensor grad_tensor = make_tensor(grad_image.data(), HP_DTYPE_F32, {static_cast<int64_t>(ray_count), 3});
+
+    std::array<std::byte, 16384> grad_ws{};
+    hp_grads_t grads{};
+    status = hp_diff(plan, &grad_tensor, &samp, &intl, &grads, grad_ws.data(), grad_ws.size());
+    if (status != HP_STATUS_SUCCESS) {
+        result.status = TestStatus::fail;
+        result.message = std::string("hp_diff failed: ") + status_to_cstr(status);
+        hp_field_release(fs);
+        hp_field_release(fc);
+        hp_plan_release(plan);
+        return result;
+    }
+
+    const float* grad_sigma = static_cast<const float*>(grads.sigma.data);
+    const float* grad_color = static_cast<const float*>(grads.color.data);
+    const size_t sample_count = (samp.dt.rank >= 1) ? static_cast<size_t>(samp.dt.shape[0]) : 0;
+
+    SampSnapshot snap = capture_samp(samp);
+
+    auto compute_loss = [&](const std::vector<float>& sigma_mut,
+                            const std::vector<float>& color_mut) -> std::optional<float> {
+        std::vector<float> positions = snap.positions;
+        std::vector<float> dt = snap.dt;
+        std::vector<uint32_t> offsets = snap.offsets;
+
+        hp_samp_t samp_mut = make_samp_view(positions, dt, offsets, const_cast<std::vector<float>&>(sigma_mut), const_cast<std::vector<float>&>(color_mut));
+
+        std::array<std::byte, 8192> intl_mut_ws{};
+        hp_intl_t intl_mut{};
+        hp_status st = hp_int(plan, &samp_mut, &intl_mut, intl_mut_ws.data(), intl_mut_ws.size());
+        if (st != HP_STATUS_SUCCESS) {
+            return std::nullopt;
+        }
+
+        std::array<std::byte, 4096> img_ws{};
+        hp_img_t img{};
+        st = hp_img(plan, &intl_mut, &rays, &img, img_ws.data(), img_ws.size());
+        if (st != HP_STATUS_SUCCESS) {
+            return std::nullopt;
+        }
+
+        const float* image = static_cast<const float*>(img.image.data);
+        return image[0] + image[1] + image[2];
+    };
+
+    std::vector<float> sigma_vec = snap.sigma;
+    std::vector<float> color_vec = snap.color;
+
+    const float eps = 1e-3f;
+    for (size_t i = 0; i < sample_count; ++i) {
+        std::vector<float> sigma_plus = sigma_vec;
+        std::vector<float> sigma_minus = sigma_vec;
+        sigma_plus[i] += eps;
+        sigma_minus[i] -= eps;
+        auto loss_plus = compute_loss(sigma_plus, color_vec);
+        auto loss_minus = compute_loss(sigma_minus, color_vec);
+        if (!loss_plus.has_value() || !loss_minus.has_value()) {
+            result.status = TestStatus::fail;
+            result.message = "loss evaluation failed";
+            hp_field_release(fs);
+            hp_field_release(fc);
+            hp_plan_release(plan);
+            return result;
+        }
+        const float fd = (*loss_plus - *loss_minus) / (2.0f * eps);
+        const float analytic = grad_sigma[i];
+        const float denom = std::max({std::fabs(fd), std::fabs(analytic), 1e-6f});
+        if (std::fabs(fd - analytic) / denom > 1e-3f) {
+            result.status = TestStatus::fail;
+            result.message = "sigma gradient mismatch";
+            hp_field_release(fs);
+            hp_field_release(fc);
+            hp_plan_release(plan);
+            return result;
+        }
+    }
+
+    for (size_t i = 0; i < sample_count; ++i) {
+        for (int c = 0; c < 3; ++c) {
+            std::vector<float> color_plus = color_vec;
+            std::vector<float> color_minus = color_vec;
+            color_plus[i * 3U + c] += eps;
+            color_minus[i * 3U + c] -= eps;
+            auto loss_plus = compute_loss(sigma_vec, color_plus);
+            auto loss_minus = compute_loss(sigma_vec, color_minus);
+            if (!loss_plus.has_value() || !loss_minus.has_value()) {
+                result.status = TestStatus::fail;
+                result.message = "loss evaluation failed";
+                hp_field_release(fs);
+                hp_field_release(fc);
+                hp_plan_release(plan);
+                return result;
+            }
+            const float fd = (*loss_plus - *loss_minus) / (2.0f * eps);
+            const float analytic = grad_color[i * 3U + c];
+            const float denom = std::max({std::fabs(fd), std::fabs(analytic), 1e-6f});
+            if (std::fabs(fd - analytic) / denom > 1e-3f) {
+                result.status = TestStatus::fail;
+                result.message = "color gradient mismatch";
+                hp_field_release(fs);
+                hp_field_release(fc);
+                hp_plan_release(plan);
+                return result;
+            }
+        }
+    }
+
+    hp_field_release(fs);
+    hp_field_release(fc);
+    hp_plan_release(plan);
+    return result;
+}
 using TestFn = CaseResult(*)(hp_ctx*);
 
 std::unordered_map<std::string, TestFn> build_registry() {
@@ -1937,7 +2137,8 @@ std::unordered_map<std::string, TestFn> build_registry() {
         {"int_cpu_early_stop", test_int_cpu_early_stop},
         {"img_cpu_basic", test_img_cpu_basic},
         {"img_cpu_roi_background", test_img_cpu_roi_background},
-        {"fused_cpu_equivalence", test_fused_cpu_equivalence}
+        {"fused_cpu_equivalence", test_fused_cpu_equivalence},
+        {"diff_cpu_sigma_color", test_diff_cpu_sigma_color}
     };
 #if defined(HP_WITH_CUDA)
     registry.emplace("ray_cuda_basic", test_ray_cuda_basic);

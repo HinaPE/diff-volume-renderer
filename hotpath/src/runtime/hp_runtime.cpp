@@ -231,8 +231,29 @@ HP_API hp_status hp_img(const hp_plan* plan,
     return hp_internal::img_generate_cpu(plan, intl, rays, img, ws, ws_bytes);
 }
 
-HP_API hp_status hp_diff(const hp_plan*, const hp_tensor*, const hp_samp_t*, const hp_intl_t*, hp_grads_t*, void*, size_t) {
-    return HP_STATUS_NOT_IMPLEMENTED;
+HP_API hp_status hp_diff(const hp_plan* plan,
+                        const hp_tensor* dL_dI,
+                        const hp_samp_t* samp,
+                        const hp_intl_t* intl,
+                        hp_grads_t* grads,
+                        void* ws,
+                        size_t ws_bytes) {
+    if (plan == nullptr || dL_dI == nullptr || samp == nullptr || intl == nullptr || grads == nullptr) {
+        return HP_STATUS_INVALID_ARGUMENT;
+    }
+
+    const hp_memspace memspace = dL_dI->memspace;
+    if (memspace == HP_MEMSPACE_DEVICE) {
+#if defined(HP_WITH_CUDA)
+        return hp_internal::diff_generate_cuda(plan, dL_dI, samp, intl, nullptr, grads, ws, ws_bytes);
+#else
+        (void)ws;
+        (void)ws_bytes;
+        return HP_STATUS_UNSUPPORTED;
+#endif
+    }
+
+    return hp_internal::diff_generate_cpu(plan, dL_dI, samp, intl, nullptr, grads, ws, ws_bytes);
 }
 
 HP_API hp_status hp_field_create_grid_sigma(const hp_ctx* ctx, const hp_tensor* grid, uint32_t interp, uint32_t oob, hp_field** out_field) {

@@ -31,6 +31,7 @@ set(DVREN_HP_CORE_SOURCES
     src/cpu/samp_cpu.cpp
     src/cpu/int_cpu.cpp
     src/cpu/samp_int_fused.cpp
+    src/cpu/diff_cpu.cpp
     src/cpu/img_cpu.cpp
     src/cpu/grid_dense_cpu.cpp
 )
@@ -41,6 +42,7 @@ if (DVREN_BUILD_CUDA)
         src/cuda/int_cuda.cu
         src/cuda/img_cuda.cu
         src/cuda/samp_int_fused.cu
+        src/cuda/diff_cuda.cu
     )
 endif ()
 

@@ -14,3 +14,4 @@ cases:
   - img_cpu_basic
   - img_cpu_roi_background
   - fused_cpu_equivalence
+  - diff_cpu_sigma_color
