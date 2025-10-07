@@ -137,4 +137,7 @@ hp_status diff_generate_cuda(const hp_plan* plan,
 float sample_grid_sigma_cpu(const hp_field* field, const float pos[3], hp_status* status);
 void sample_grid_color_cpu(const hp_field* field, const float pos[3], float out_rgb[3], hp_status* status);
 
+float sample_hash_mlp_sigma_cpu(const hp_field* field, const float pos[3], hp_status* status);
+void sample_hash_mlp_color_cpu(const hp_field* field, const float pos[3], float out_rgb[3], hp_status* status);
+
 }  // namespace hp_internal

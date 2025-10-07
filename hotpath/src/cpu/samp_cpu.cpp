@@ -246,7 +246,13 @@ hp_status samp_generate_cpu(const hp_plan* plan,
             buffers.dt[total_samples] = dt_actual;
 
             if (fs != nullptr) {
-                const float sigma_val = sample_grid_sigma_cpu(fs, &buffers.positions[sample_vec_idx], &field_status);
+                float sigma_val = 0.0f;
+                // Dispatch based on field type
+                if (fs->kind == hp_field_kind::hash_mlp) {
+                    sigma_val = sample_hash_mlp_sigma_cpu(fs, &buffers.positions[sample_vec_idx], &field_status);
+                } else {
+                    sigma_val = sample_grid_sigma_cpu(fs, &buffers.positions[sample_vec_idx], &field_status);
+                }
                 if (field_status != HP_STATUS_SUCCESS) {
                     return field_status;
                 }
@@ -257,7 +263,12 @@ hp_status samp_generate_cpu(const hp_plan* plan,
 
             if (fc != nullptr) {
                 float rgb[3]{0.0f, 0.0f, 0.0f};
-                sample_grid_color_cpu(fc, &buffers.positions[sample_vec_idx], rgb, &field_status);
+                // Dispatch based on field type
+                if (fc->kind == hp_field_kind::hash_mlp) {
+                    sample_hash_mlp_color_cpu(fc, &buffers.positions[sample_vec_idx], rgb, &field_status);
+                } else {
+                    sample_grid_color_cpu(fc, &buffers.positions[sample_vec_idx], rgb, &field_status);
+                }
                 if (field_status != HP_STATUS_SUCCESS) {
                     return field_status;
                 }

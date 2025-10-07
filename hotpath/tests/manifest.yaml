@@ -17,3 +17,5 @@ cases:
   - diff_cpu_sigma_color
   - diff_cuda_sigma_color
   - diff_cuda_determinism
+  - hash_mlp_cpu_basic
+  - hash_mlp_cpu_determinism

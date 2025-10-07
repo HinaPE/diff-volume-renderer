@@ -339,12 +339,34 @@ HP_API hp_status hp_field_create_grid_color(const hp_ctx* ctx, const hp_tensor* 
 }
 
 HP_API hp_status hp_field_create_hash_mlp(const hp_ctx* ctx, const hp_tensor* params, hp_field** out_field) {
-    if (ctx == nullptr || out_field == nullptr) {
+    if (ctx == nullptr || params == nullptr || out_field == nullptr) {
         return HP_STATUS_INVALID_ARGUMENT;
     }
-    (void)params;
-    (void)ctx;
-    return HP_STATUS_NOT_IMPLEMENTED;
+
+    auto* field = new (std::nothrow) hp_field();
+    if (field == nullptr) {
+        return HP_STATUS_OUT_OF_MEMORY;
+    }
+
+    if (params->dtype != HP_DTYPE_F32) {
+        delete field;
+        return HP_STATUS_INVALID_ARGUMENT;
+    }
+
+    // Hash-MLP params tensor should contain all weights and hash table
+    field->kind = hp_field_kind::hash_mlp;
+    field->source = *params;
+    field->interp = HP_INTERP_LINEAR;  // Not used for hash-MLP
+    field->oob = HP_OOB_ZERO;          // Not used for hash-MLP
+    field->world_min[0] = 0.0f;
+    field->world_min[1] = 0.0f;
+    field->world_min[2] = 0.0f;
+    field->world_max[0] = 1.0f;
+    field->world_max[1] = 1.0f;
+    field->world_max[2] = 1.0f;
+
+    *out_field = field;
+    return HP_STATUS_SUCCESS;
 }
 
 HP_API void hp_field_release(hp_field* field) {
