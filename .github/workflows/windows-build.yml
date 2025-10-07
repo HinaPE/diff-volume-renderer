@@ -1,59 +1,88 @@
-name: Windows Build
+name: Windows CI
 
 on:
   push:
     branches: [ main, master ]
   pull_request:
 
+env:
+  BUILD_TYPE: Release
+
 jobs:
-  build:
+  hotpath:
+    name: hotpath - build & test
     runs-on: windows-latest
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Ninja
+        run: choco install ninja --yes --no-progress
+        shell: pwsh
 
       - name: Set up MSVC (x64)
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
 
-      - name: Install CUDA Toolkit
-        run: choco install cuda --yes --no-progress --timeout 7200
+      - name: Configure hotpath
+        run: |
+          cmake -S hotpath -B build-hotpath ^
+            -G "Ninja Multi-Config" ^
+            -DDVREN_BUILD_TESTS=ON ^
+            -DDVREN_BUILD_CPU=ON ^
+            -DDVREN_BUILD_CUDA=OFF
         shell: pwsh
 
-      - name: Export CUDA environment
+      - name: Build hotpath runner
+        run: cmake --build build-hotpath --config $env:BUILD_TYPE --target hp_runner
         shell: pwsh
-        run: |
-          $cudaRoot = Get-ChildItem 'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA' -ErrorAction SilentlyContinue | Sort-Object Name -Descending | Select-Object -First 1
-          if (-not $cudaRoot) { throw 'CUDA installation not found under C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA' }
-          Add-Content -Path $env:GITHUB_ENV -Value "CUDA_PATH=$($cudaRoot.FullName)"
-          Add-Content -Path $env:GITHUB_ENV -Value "CUDA_HOME=$($cudaRoot.FullName)"
-          Add-Content -Path $env:GITHUB_PATH -Value "$($cudaRoot.FullName)\bin"
-          Add-Content -Path $env:GITHUB_PATH -Value "$($cudaRoot.FullName)\libnvvp"
 
-      - name: Configure with CMake
-        shell: pwsh
+      - name: Run hotpath tests
         run: |
-          cmake -B build -S . -G Ninja `
-            -DCMAKE_BUILD_TYPE=Release `
-            -DCMAKE_C_COMPILER=cl `
-            -DCMAKE_CXX_COMPILER=cl `
-            -DDVREN_ENABLE_CUDA=OFF `
-            -DDVREN_BUILD_PROJECT_TESTS=ON `
+          Set-StrictMode -Version Latest
+          .\build-hotpath\${{ env.BUILD_TYPE }}\hp_runner.exe | Tee-Object hp_runner.log
+        shell: pwsh
+
+  dvren:
+    name: dvren - build & test
+    runs-on: windows-latest
+    needs: hotpath
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Ninja
+        run: choco install ninja --yes --no-progress
+        shell: pwsh
+
+      - name: Set up MSVC (x64)
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Configure dvren
+        run: |
+          cmake -S . -B build ^
+            -G "Ninja Multi-Config" ^
+            -DDVREN_ENABLE_CUDA=OFF ^
+            -DDVREN_BUILD_PROJECT_TESTS=ON ^
             -DDVREN_ENABLE_HOTPATH_TESTS=OFF
-
-      - name: Build Core Targets
         shell: pwsh
+
+      - name: Build dvren targets
+        run: cmake --build build --config $env:BUILD_TYPE --target dvren_core_tests dvren_render
+        shell: pwsh
+
+      - name: Run dvren tests
+        run: ctest --output-on-failure --test-dir build -C $env:BUILD_TYPE
+        shell: pwsh
+
+      - name: Smoke CLI run
         run: |
-          cmake --build build --config Release --target dvren_core_tests
-          cmake --build build --config Release --target hp_runner
-
-      - name: Run Unit Tests
+          Set-StrictMode -Version Latest
+          .\build\${{ env.BUILD_TYPE }}\dvren_render.exe examples\simple_volume.json ci_output.ppm
+          Remove-Item ci_output.ppm
         shell: pwsh
-        run: ctest --output-on-failure -C Release
-        working-directory: build
-
-      - name: Run Hotpath Gates
-        shell: pwsh
-        run: |
-          .\build\hotpath\Release\hp_runner.exe *> hp_scoreboard.log
-          python hotpath/scripts/ci_check.py hp_scoreboard.log

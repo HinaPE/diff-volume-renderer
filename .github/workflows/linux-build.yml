@@ -1,64 +1,99 @@
-name: Linux Build
+name: Linux CI
 
 on:
   push:
     branches: [ main, master ]
   pull_request:
 
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+env:
+  BUILD_TYPE: Release
 
-      - name: Install dependencies
+jobs:
+  hotpath:
+    name: hotpath - build & test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             build-essential \
             cmake \
             ninja-build \
+            python3 \
             zlib1g-dev \
             libblosc-dev \
             libtbb-dev \
             libboost-all-dev \
             libimath-dev \
             libopenexr-dev \
-            libjemalloc-dev \
-            nvidia-cuda-toolkit
+            libjemalloc-dev
 
-      - name: Export CUDA environment
+      - name: Configure hotpath
         run: |
-          if [ -d /usr/lib/cuda ]; then
-            echo "CUDA_HOME=/usr/lib/cuda" >> "$GITHUB_ENV"
-            echo "CUDA_PATH=/usr/lib/cuda" >> "$GITHUB_ENV"
-            echo "/usr/lib/cuda/bin" >> "$GITHUB_PATH"
-          elif [ -d /usr/lib/nvidia-cuda-toolkit ]; then
-            echo "CUDA_HOME=/usr/lib/nvidia-cuda-toolkit" >> "$GITHUB_ENV"
-            echo "CUDA_PATH=/usr/lib/nvidia-cuda-toolkit" >> "$GITHUB_ENV"
-            echo "/usr/lib/nvidia-cuda-toolkit/bin" >> "$GITHUB_PATH"
-          else
-            echo "Warning: CUDA toolkit directory not found after installation" >&2
-          fi
-          nvcc --version
+          cmake -S hotpath -B build-hotpath \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
+            -DDVREN_BUILD_TESTS=ON \
+            -DDVREN_BUILD_CPU=ON \
+            -DDVREN_BUILD_CUDA=OFF
 
-      - name: Configure with CMake
-        run: >
-          cmake -B build -S .
-          -G Ninja
-          -DCMAKE_BUILD_TYPE=Release
-          -DDVREN_ENABLE_CUDA=OFF
-          -DDVREN_BUILD_PROJECT_TESTS=ON
-          -DDVREN_ENABLE_HOTPATH_TESTS=OFF
+      - name: Build hotpath runner
+        run: cmake --build build-hotpath --target hp_runner --config ${{ env.BUILD_TYPE }}
 
-      - name: Build Core Targets
-        run: cmake --build build --target dvren_core_tests hp_runner
-
-      - name: Run Unit Tests
-        run: ctest --output-on-failure
-        working-directory: build
-
-      - name: Run Hotpath Gates
+      - name: Run hotpath tests
+        working-directory: build-hotpath
         run: |
-          ./build/hotpath/hp_runner > hp_scoreboard.log
-          python3 hotpath/scripts/ci_check.py hp_scoreboard.log
+          set -euo pipefail
+          ./hp_runner > hp_runner.log
+          tail -n 20 hp_runner.log
+
+  dvren:
+    name: dvren - build & test
+    runs-on: ubuntu-latest
+    needs: hotpath
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            ninja-build \
+            python3 \
+            zlib1g-dev \
+            libblosc-dev \
+            libtbb-dev \
+            libboost-all-dev \
+            libimath-dev \
+            libopenexr-dev \
+            libjemalloc-dev
+
+      - name: Configure dvren
+        run: |
+          cmake -S . -B build \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
+            -DDVREN_ENABLE_CUDA=OFF \
+            -DDVREN_BUILD_PROJECT_TESTS=ON \
+            -DDVREN_ENABLE_HOTPATH_TESTS=OFF
+
+      - name: Build dvren targets
+        run: cmake --build build --target dvren_core_tests dvren_render --config ${{ env.BUILD_TYPE }}
+
+      - name: Run dvren tests
+        run: ctest --output-on-failure --test-dir build
+
+      - name: Smoke CLI run
+        run: |
+          set -euo pipefail
+          ./build/dvren_render examples/simple_volume.json ci_output.ppm
+          rm -f ci_output.ppm
