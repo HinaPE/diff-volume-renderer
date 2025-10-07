@@ -1,0 +1,88 @@
+name: HP9 CI Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    name: Build and Test
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Setup CUDA
+      uses: Jimver/cuda-toolkit@v0.2.11
+      with:
+        cuda: '12.0.0'
+
+    - name: Configure CMake
+      run: |
+        cd hotpath
+        cmake -B build -DCMAKE_BUILD_TYPE=Release -DDVREN_BUILD_CUDA=ON
+
+    - name: Build
+      run: |
+        cd hotpath
+        cmake --build build --config Release
+
+    - name: Run Tests
+      run: |
+        cd hotpath
+        build\Release\hp_runner.exe > test_output.txt 2>&1
+        type test_output.txt
+
+    - name: Check Test Results
+      run: |
+        cd hotpath
+        python scripts/ci_check.py test_output.txt
+
+    - name: Run Profiling
+      if: success()
+      run: |
+        cd hotpath
+        python scripts/profile.py --output artifacts/profiling
+
+    - name: Upload Artifacts
+      if: always()
+      uses: actions/upload-artifact@v3
+      with:
+        name: test-results
+        path: |
+          hotpath/test_output.txt
+          hotpath/artifacts/
+
+    - name: Lock Thresholds
+      if: github.ref == 'refs/heads/main' && success()
+      run: |
+        cd hotpath
+        python scripts/lock_thresholds.py
+        git config user.name "CI Bot"
+        git config user.email "ci@dvren.local"
+        git add tests/thresholds.yaml
+        git commit -m "CI: Lock thresholds [skip ci]" || echo "No changes to commit"
+
+  validate-contracts:
+    name: Validate Contracts
+    runs-on: windows-latest
+    needs: build-and-test
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Download Artifacts
+      uses: actions/download-artifact@v3
+      with:
+        name: test-results
+
+    - name: Validate All Gates
+      run: |
+        cd hotpath
+        python scripts/validate_gates.py artifacts/profiling/benchmark_results.json
+
