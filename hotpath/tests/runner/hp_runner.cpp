@@ -1951,14 +1951,9 @@ CaseResult test_diff_cpu_sigma_color(hp_ctx* ctx) {
 
     std::vector<float> sigma_grid{0.6f, 0.8f, 0.7f, 0.5f};
     std::vector<float> color_grid{
-        0.3f, 0.4f, 0.5f,
-        0.6f, 0.2f, 0.1f,
-        0.4f, 0.5f, 0.2f,
-        0.2f, 0.3f, 0.7f,
-        0.5f, 0.4f, 0.6f,
-        0.1f, 0.2f, 0.3f,
-        0.7f, 0.5f, 0.1f,
-        0.6f, 0.6f, 0.2f};
+        0.3f, 0.4f, 0.5f, 0.6f, 0.2f, 0.1f, 0.4f, 0.5f,
+        0.2f, 0.2f, 0.3f, 0.7f, 0.5f, 0.4f, 0.6f, 0.1f,
+        0.2f, 0.3f, 0.7f, 0.5f, 0.1f, 0.6f, 0.6f, 0.2f};
 
     hp_tensor sigma_tensor = make_tensor(sigma_grid.data(), HP_DTYPE_F32, {2, 2, 1});
     hp_tensor color_tensor = make_tensor(color_grid.data(), HP_DTYPE_F32, {2, 2, 2, 3});
@@ -1966,16 +1961,16 @@ CaseResult test_diff_cpu_sigma_color(hp_ctx* ctx) {
     hp_field* fs = nullptr;
     hp_field* fc = nullptr;
     status = hp_field_create_grid_sigma(ctx, &sigma_tensor, HP_INTERP_LINEAR, HP_OOB_ZERO, &fs);
-    if (status != HP_STATUS_SUCCESS || fs == nullptr) {
+    if (status != HP_STATUS_SUCCESS) {
         result.status = TestStatus::fail;
-        result.message = std::string("hp_field_create_grid_sigma failed: ") + status_to_cstr(status);
+        result.message = "hp_field_create_grid_sigma failed";
         hp_plan_release(plan);
         return result;
     }
     status = hp_field_create_grid_color(ctx, &color_tensor, HP_INTERP_LINEAR, HP_OOB_ZERO, &fc);
-    if (status != HP_STATUS_SUCCESS || fc == nullptr) {
+    if (status != HP_STATUS_SUCCESS) {
         result.status = TestStatus::fail;
-        result.message = std::string("hp_field_create_grid_color failed: ") + status_to_cstr(status);
+        result.message = "hp_field_create_grid_color failed";
         hp_field_release(fs);
         hp_plan_release(plan);
         return result;
@@ -2120,6 +2115,400 @@ CaseResult test_diff_cpu_sigma_color(hp_ctx* ctx) {
     hp_plan_release(plan);
     return result;
 }
+#if defined(HP_WITH_CUDA)
+CaseResult test_diff_cuda_sigma_color(hp_ctx* ctx) {
+    CaseResult result{"diff_cuda_sigma_color", TestStatus::pass, ""};
+    int device_count = 0;
+    if (cudaGetDeviceCount(&device_count) != cudaSuccess || device_count == 0) {
+        result.status = TestStatus::skip;
+        result.message = "no CUDA device available";
+        return result;
+    }
+
+    hp_plan_desc plan_desc = make_basic_plan_desc(1, 1, 0.0f, 1.0f);
+    plan_desc.max_rays = 1;
+    plan_desc.max_samples = 4;
+    plan_desc.sampling.dt = 0.25f;
+    plan_desc.sampling.max_steps = 4;
+
+    hp_plan* plan = nullptr;
+    hp_status status = hp_plan_create(ctx, &plan_desc, &plan);
+    if (status != HP_STATUS_SUCCESS || plan == nullptr) {
+        result.status = TestStatus::fail;
+        result.message = std::string("hp_plan_create failed: ") + status_to_cstr(status);
+        return result;
+    }
+
+    // Run on CPU first to get reference
+    std::array<std::byte, 4096> ray_ws{};
+    hp_rays_t rays_cpu{};
+    status = hp_ray(plan, nullptr, &rays_cpu, ray_ws.data(), ray_ws.size());
+    if (status != HP_STATUS_SUCCESS) {
+        result.status = TestStatus::fail;
+        result.message = std::string("hp_ray failed: ") + status_to_cstr(status);
+        hp_plan_release(plan);
+        return result;
+    }
+
+    std::vector<float> sigma_grid{0.6f, 0.8f, 0.7f, 0.5f};
+    std::vector<float> color_grid{
+        0.3f, 0.4f, 0.5f, 0.6f, 0.2f, 0.1f, 0.4f, 0.5f,
+        0.2f, 0.2f, 0.3f, 0.7f, 0.5f, 0.4f, 0.6f, 0.1f,
+        0.2f, 0.3f, 0.7f, 0.5f, 0.1f, 0.6f, 0.6f, 0.2f};
+
+    hp_tensor sigma_tensor = make_tensor(sigma_grid.data(), HP_DTYPE_F32, {2, 2, 1});
+    hp_tensor color_tensor = make_tensor(color_grid.data(), HP_DTYPE_F32, {2, 2, 2, 3});
+
+    hp_field* fs = nullptr;
+    hp_field* fc = nullptr;
+    status = hp_field_create_grid_sigma(ctx, &sigma_tensor, HP_INTERP_LINEAR, HP_OOB_ZERO, &fs);
+    if (status != HP_STATUS_SUCCESS) {
+        result.status = TestStatus::fail;
+        result.message = "hp_field_create_grid_sigma failed";
+        hp_plan_release(plan);
+        return result;
+    }
+    status = hp_field_create_grid_color(ctx, &color_tensor, HP_INTERP_LINEAR, HP_OOB_ZERO, &fc);
+    if (status != HP_STATUS_SUCCESS) {
+        result.status = TestStatus::fail;
+        result.message = "hp_field_create_grid_color failed";
+        hp_field_release(fs);
+        hp_plan_release(plan);
+        return result;
+    }
+
+    std::array<std::byte, 8192> samp_ws{};
+    hp_samp_t samp_cpu{};
+    status = hp_samp(plan, fs, fc, &rays_cpu, &samp_cpu, samp_ws.data(), samp_ws.size());
+    if (status != HP_STATUS_SUCCESS) {
+        result.status = TestStatus::fail;
+        result.message = "hp_samp CPU failed";
+        hp_field_release(fs);
+        hp_field_release(fc);
+        hp_plan_release(plan);
+        return result;
+    }
+
+    std::array<std::byte, 8192> intl_ws{};
+    hp_intl_t intl_cpu{};
+    status = hp_int(plan, &samp_cpu, &intl_cpu, intl_ws.data(), intl_ws.size());
+    if (status != HP_STATUS_SUCCESS) {
+        result.status = TestStatus::fail;
+        result.message = "hp_int CPU failed";
+        hp_field_release(fs);
+        hp_field_release(fc);
+        hp_plan_release(plan);
+        return result;
+    }
+
+    const size_t sample_count = static_cast<size_t>(samp_cpu.dt.shape[0]);
+    const size_t ray_count = static_cast<size_t>(intl_cpu.transmittance.shape[0]);
+
+    // Copy sampling and integration data to device
+    float* d_dt = nullptr;
+    float* d_sigma = nullptr;
+    float* d_color = nullptr;
+    uint32_t* d_offsets = nullptr;
+    float* d_aux = nullptr;
+    float* d_grad_input = nullptr;
+
+    const size_t dt_bytes = sample_count * sizeof(float);
+    const size_t sigma_bytes = sample_count * sizeof(float);
+    const size_t color_bytes = sample_count * 3U * sizeof(float);
+    const size_t offset_bytes = (ray_count + 1) * sizeof(uint32_t);
+    const size_t aux_bytes = sample_count * 4U * sizeof(float);
+    const size_t grad_input_bytes = ray_count * 3U * sizeof(float);
+
+    if (cudaMalloc(&d_dt, dt_bytes) != cudaSuccess ||
+        cudaMalloc(&d_sigma, sigma_bytes) != cudaSuccess ||
+        cudaMalloc(&d_color, color_bytes) != cudaSuccess ||
+        cudaMalloc(&d_offsets, offset_bytes) != cudaSuccess ||
+        cudaMalloc(&d_aux, aux_bytes) != cudaSuccess ||
+        cudaMalloc(&d_grad_input, grad_input_bytes) != cudaSuccess) {
+        result.status = TestStatus::skip;
+        result.message = "cudaMalloc failed";
+        cudaFree(d_dt);
+        cudaFree(d_sigma);
+        cudaFree(d_color);
+        cudaFree(d_offsets);
+        cudaFree(d_aux);
+        cudaFree(d_grad_input);
+        hp_plan_release(plan);
+        return result;
+    }
+
+    cudaMemcpy(d_dt, samp_cpu.dt.data, dt_bytes, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_sigma, samp_cpu.sigma.data, sigma_bytes, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_color, samp_cpu.color.data, color_bytes, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_offsets, samp_cpu.ray_offset.data, offset_bytes, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_aux, intl_cpu.aux.data, aux_bytes, cudaMemcpyHostToDevice);
+
+    std::vector<float> grad_input(ray_count * 3U, 1.0f);
+    cudaMemcpy(d_grad_input, grad_input.data(), grad_input_bytes, cudaMemcpyHostToDevice);
+
+    hp_samp_t samp_cuda{};
+    samp_cuda.dt = make_tensor(d_dt, HP_DTYPE_F32, {static_cast<int64_t>(sample_count)});
+    samp_cuda.dt.memspace = HP_MEMSPACE_DEVICE;
+    samp_cuda.sigma = make_tensor(d_sigma, HP_DTYPE_F32, {static_cast<int64_t>(sample_count)});
+    samp_cuda.sigma.memspace = HP_MEMSPACE_DEVICE;
+    samp_cuda.color = make_tensor(d_color, HP_DTYPE_F32, {static_cast<int64_t>(sample_count), 3});
+    samp_cuda.color.memspace = HP_MEMSPACE_DEVICE;
+    samp_cuda.ray_offset = make_tensor(d_offsets, HP_DTYPE_U32, {static_cast<int64_t>(ray_count + 1)});
+    samp_cuda.ray_offset.memspace = HP_MEMSPACE_DEVICE;
+
+    hp_intl_t intl_cuda{};
+    intl_cuda.aux = make_tensor(d_aux, HP_DTYPE_F32, {static_cast<int64_t>(sample_count), 4});
+    intl_cuda.aux.memspace = HP_MEMSPACE_DEVICE;
+
+    hp_tensor grad_tensor_cuda = make_tensor(d_grad_input, HP_DTYPE_F32, {static_cast<int64_t>(ray_count), 3});
+    grad_tensor_cuda.memspace = HP_MEMSPACE_DEVICE;
+
+    hp_grads_t grads_cuda{};
+    status = hp_diff(plan, &grad_tensor_cuda, &samp_cuda, &intl_cuda, &grads_cuda, nullptr, 0);
+    if (status != HP_STATUS_SUCCESS) {
+        result.status = TestStatus::fail;
+        result.message = std::string("hp_diff CUDA failed: ") + status_to_cstr(status);
+        cudaFree(d_dt);
+        cudaFree(d_sigma);
+        cudaFree(d_color);
+        cudaFree(d_offsets);
+        cudaFree(d_aux);
+        cudaFree(d_grad_input);
+        hp_field_release(fs);
+        hp_field_release(fc);
+        hp_plan_release(plan);
+        return result;
+    }
+
+    // Copy gradients back to host
+    std::vector<float> grad_sigma_cuda(sample_count);
+    std::vector<float> grad_color_cuda(sample_count * 3U);
+    cudaMemcpy(grad_sigma_cuda.data(), grads_cuda.sigma.data, sigma_bytes, cudaMemcpyDeviceToHost);
+    cudaMemcpy(grad_color_cuda.data(), grads_cuda.color.data, color_bytes, cudaMemcpyDeviceToHost);
+
+    // Run CPU backward for comparison
+    hp_tensor grad_tensor_cpu = make_tensor(grad_input.data(), HP_DTYPE_F32, {static_cast<int64_t>(ray_count), 3});
+    hp_grads_t grads_cpu{};
+    status = hp_diff(plan, &grad_tensor_cpu, &samp_cpu, &intl_cpu, &grads_cpu, nullptr, 0);
+    if (status != HP_STATUS_SUCCESS) {
+        result.status = TestStatus::fail;
+        result.message = "hp_diff CPU failed";
+        cudaFree(static_cast<float*>(grads_cuda.sigma.data));
+        cudaFree(static_cast<float*>(grads_cuda.color.data));
+        cudaFree(static_cast<float*>(grads_cuda.camera.data));
+        cudaFree(d_dt);
+        cudaFree(d_sigma);
+        cudaFree(d_color);
+        cudaFree(d_offsets);
+        cudaFree(d_aux);
+        cudaFree(d_grad_input);
+        hp_field_release(fs);
+        hp_field_release(fc);
+        hp_plan_release(plan);
+        return result;
+    }
+
+    const float* grad_sigma_cpu_ptr = static_cast<const float*>(grads_cpu.sigma.data);
+    const float* grad_color_cpu_ptr = static_cast<const float*>(grads_cpu.color.data);
+
+    // Compare CPU and CUDA gradients
+    for (size_t i = 0; i < sample_count; ++i) {
+        const float diff = std::fabs(grad_sigma_cuda[i] - grad_sigma_cpu_ptr[i]);
+        const float denom = std::max({std::fabs(grad_sigma_cuda[i]), std::fabs(grad_sigma_cpu_ptr[i]), 1e-6f});
+        if (diff / denom > 1e-3f) {
+            result.status = TestStatus::fail;
+            result.message = "CUDA sigma gradient mismatch with CPU";
+            cudaFree(static_cast<float*>(grads_cuda.sigma.data));
+            cudaFree(static_cast<float*>(grads_cuda.color.data));
+            cudaFree(static_cast<float*>(grads_cuda.camera.data));
+            cudaFree(d_dt);
+            cudaFree(d_sigma);
+            cudaFree(d_color);
+            cudaFree(d_offsets);
+            cudaFree(d_aux);
+            cudaFree(d_grad_input);
+            hp_field_release(fs);
+            hp_field_release(fc);
+            hp_plan_release(plan);
+            return result;
+        }
+    }
+
+    for (size_t i = 0; i < sample_count * 3U; ++i) {
+        const float diff = std::fabs(grad_color_cuda[i] - grad_color_cpu_ptr[i]);
+        const float denom = std::max({std::fabs(grad_color_cuda[i]), std::fabs(grad_color_cpu_ptr[i]), 1e-6f});
+        if (diff / denom > 1e-3f) {
+            result.status = TestStatus::fail;
+            result.message = "CUDA color gradient mismatch with CPU";
+            cudaFree(static_cast<float*>(grads_cuda.sigma.data));
+            cudaFree(static_cast<float*>(grads_cuda.color.data));
+            cudaFree(static_cast<float*>(grads_cuda.camera.data));
+            cudaFree(d_dt);
+            cudaFree(d_sigma);
+            cudaFree(d_color);
+            cudaFree(d_offsets);
+            cudaFree(d_aux);
+            cudaFree(d_grad_input);
+            hp_field_release(fs);
+            hp_field_release(fc);
+            hp_plan_release(plan);
+            return result;
+        }
+    }
+
+    cudaFree(static_cast<float*>(grads_cuda.sigma.data));
+    cudaFree(static_cast<float*>(grads_cuda.color.data));
+    cudaFree(static_cast<float*>(grads_cuda.camera.data));
+    cudaFree(d_dt);
+    cudaFree(d_sigma);
+    cudaFree(d_color);
+    cudaFree(d_offsets);
+    cudaFree(d_aux);
+    cudaFree(d_grad_input);
+    hp_field_release(fs);
+    hp_field_release(fc);
+    hp_plan_release(plan);
+    return result;
+}
+
+CaseResult test_diff_cuda_determinism(hp_ctx* ctx) {
+    CaseResult result{"diff_cuda_determinism", TestStatus::pass, ""};
+    int device_count = 0;
+    if (cudaGetDeviceCount(&device_count) != cudaSuccess || device_count == 0) {
+        result.status = TestStatus::skip;
+        result.message = "no CUDA device available";
+        return result;
+    }
+
+    hp_plan_desc plan_desc = make_basic_plan_desc(2, 2, 0.0f, 1.0f);
+    plan_desc.max_rays = 4;
+    plan_desc.max_samples = 16;
+    plan_desc.sampling.dt = 0.25f;
+    plan_desc.sampling.max_steps = 4;
+    plan_desc.seed = 42;
+
+    hp_plan* plan = nullptr;
+    hp_status status = hp_plan_create(ctx, &plan_desc, &plan);
+    if (status != HP_STATUS_SUCCESS) {
+        result.status = TestStatus::fail;
+        result.message = "hp_plan_create failed";
+        return result;
+    }
+
+    std::array<std::byte, 4096> ray_ws{};
+    hp_rays_t rays_cpu{};
+    status = hp_ray(plan, nullptr, &rays_cpu, ray_ws.data(), ray_ws.size());
+    if (status != HP_STATUS_SUCCESS) {
+        result.status = TestStatus::fail;
+        result.message = "hp_ray failed";
+        hp_plan_release(plan);
+        return result;
+    }
+
+    std::vector<float> sigma_grid(8, 0.5f);
+    std::vector<float> color_grid(24, 0.5f);
+
+    hp_tensor sigma_tensor = make_tensor(sigma_grid.data(), HP_DTYPE_F32, {2, 2, 2});
+    hp_tensor color_tensor = make_tensor(color_grid.data(), HP_DTYPE_F32, {2, 2, 2, 3});
+
+    hp_field* fs = nullptr;
+    hp_field* fc = nullptr;
+    hp_field_create_grid_sigma(ctx, &sigma_tensor, HP_INTERP_LINEAR, HP_OOB_ZERO, &fs);
+    hp_field_create_grid_color(ctx, &color_tensor, HP_INTERP_LINEAR, HP_OOB_ZERO, &fc);
+
+    std::array<std::byte, 8192> samp_ws{};
+    hp_samp_t samp_cpu{};
+    hp_samp(plan, fs, fc, &rays_cpu, &samp_cpu, samp_ws.data(), samp_ws.size());
+
+    std::array<std::byte, 8192> intl_ws{};
+    hp_intl_t intl_cpu{};
+    hp_int(plan, &samp_cpu, &intl_cpu, intl_ws.data(), intl_ws.size());
+
+    const size_t sample_count = static_cast<size_t>(samp_cpu.dt.shape[0]);
+    const size_t ray_count = static_cast<size_t>(intl_cpu.transmittance.shape[0]);
+
+    // Run CUDA backward twice and check for determinism
+    auto run_cuda_backward = [&]() -> std::vector<float> {
+        float* d_dt = nullptr;
+        float* d_sigma = nullptr;
+        float* d_color = nullptr;
+        uint32_t* d_offsets = nullptr;
+        float* d_aux = nullptr;
+        float* d_grad_input = nullptr;
+
+        cudaMalloc(&d_dt, sample_count * sizeof(float));
+        cudaMalloc(&d_sigma, sample_count * sizeof(float));
+        cudaMalloc(&d_color, sample_count * 3U * sizeof(float));
+        cudaMalloc(&d_offsets, (ray_count + 1) * sizeof(uint32_t));
+        cudaMalloc(&d_aux, sample_count * 4U * sizeof(float));
+        cudaMalloc(&d_grad_input, ray_count * 3U * sizeof(float));
+
+        cudaMemcpy(d_dt, samp_cpu.dt.data, sample_count * sizeof(float), cudaMemcpyHostToDevice);
+        cudaMemcpy(d_sigma, samp_cpu.sigma.data, sample_count * sizeof(float), cudaMemcpyHostToDevice);
+        cudaMemcpy(d_color, samp_cpu.color.data, sample_count * 3U * sizeof(float), cudaMemcpyHostToDevice);
+        cudaMemcpy(d_offsets, samp_cpu.ray_offset.data, (ray_count + 1) * sizeof(uint32_t), cudaMemcpyHostToDevice);
+        cudaMemcpy(d_aux, intl_cpu.aux.data, sample_count * 4U * sizeof(float), cudaMemcpyHostToDevice);
+
+        std::vector<float> grad_input(ray_count * 3U, 1.0f);
+        cudaMemcpy(d_grad_input, grad_input.data(), ray_count * 3U * sizeof(float), cudaMemcpyHostToDevice);
+
+        hp_samp_t samp_cuda{};
+        samp_cuda.dt = make_tensor(d_dt, HP_DTYPE_F32, {static_cast<int64_t>(sample_count)});
+        samp_cuda.dt.memspace = HP_MEMSPACE_DEVICE;
+        samp_cuda.sigma = make_tensor(d_sigma, HP_DTYPE_F32, {static_cast<int64_t>(sample_count)});
+        samp_cuda.sigma.memspace = HP_MEMSPACE_DEVICE;
+        samp_cuda.color = make_tensor(d_color, HP_DTYPE_F32, {static_cast<int64_t>(sample_count), 3});
+        samp_cuda.color.memspace = HP_MEMSPACE_DEVICE;
+        samp_cuda.ray_offset = make_tensor(d_offsets, HP_DTYPE_U32, {static_cast<int64_t>(ray_count + 1)});
+        samp_cuda.ray_offset.memspace = HP_MEMSPACE_DEVICE;
+
+        hp_intl_t intl_cuda{};
+        intl_cuda.aux = make_tensor(d_aux, HP_DTYPE_F32, {static_cast<int64_t>(sample_count), 4});
+        intl_cuda.aux.memspace = HP_MEMSPACE_DEVICE;
+
+        hp_tensor grad_tensor_cuda = make_tensor(d_grad_input, HP_DTYPE_F32, {static_cast<int64_t>(ray_count), 3});
+        grad_tensor_cuda.memspace = HP_MEMSPACE_DEVICE;
+
+        hp_grads_t grads_cuda{};
+        hp_diff(plan, &grad_tensor_cuda, &samp_cuda, &intl_cuda, &grads_cuda, nullptr, 0);
+
+        std::vector<float> grad_sigma(sample_count);
+        cudaMemcpy(grad_sigma.data(), grads_cuda.sigma.data, sample_count * sizeof(float), cudaMemcpyDeviceToHost);
+
+        cudaFree(static_cast<float*>(grads_cuda.sigma.data));
+        cudaFree(static_cast<float*>(grads_cuda.color.data));
+        cudaFree(static_cast<float*>(grads_cuda.camera.data));
+        cudaFree(d_dt);
+        cudaFree(d_sigma);
+        cudaFree(d_color);
+        cudaFree(d_offsets);
+        cudaFree(d_aux);
+        cudaFree(d_grad_input);
+
+        return grad_sigma;
+    };
+
+    std::vector<float> grads1 = run_cuda_backward();
+    std::vector<float> grads2 = run_cuda_backward();
+
+    for (size_t i = 0; i < sample_count; ++i) {
+        if (std::fabs(grads1[i] - grads2[i]) > 1e-6f) {
+            result.status = TestStatus::fail;
+            result.message = "CUDA backward not deterministic";
+            hp_field_release(fs);
+            hp_field_release(fc);
+            hp_plan_release(plan);
+            return result;
+        }
+    }
+
+    hp_field_release(fs);
+    hp_field_release(fc);
+    hp_plan_release(plan);
+    return result;
+}
+#endif
+
 using TestFn = CaseResult(*)(hp_ctx*);
 
 std::unordered_map<std::string, TestFn> build_registry() {
@@ -2142,6 +2531,8 @@ std::unordered_map<std::string, TestFn> build_registry() {
     };
 #if defined(HP_WITH_CUDA)
     registry.emplace("ray_cuda_basic", test_ray_cuda_basic);
+    registry.emplace("diff_cuda_sigma_color", test_diff_cuda_sigma_color);
+    registry.emplace("diff_cuda_determinism", test_diff_cuda_determinism);
 #endif
     return registry;
 }

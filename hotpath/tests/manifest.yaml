@@ -15,3 +15,5 @@ cases:
   - img_cpu_roi_background
   - fused_cpu_equivalence
   - diff_cpu_sigma_color
+  - diff_cuda_sigma_color
+  - diff_cuda_determinism
