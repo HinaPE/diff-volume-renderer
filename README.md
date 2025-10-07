@@ -7,6 +7,20 @@ A high-performance CUDA volume renderer designed to be a small black box: give i
 
 ---
 
+## 0. Phase P0 快速演示
+
+P0 已新增主工程封装与命令行渲染器。构建成功后可直接运行：
+
+```bash
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build --target dvren_render
+./build/Release/dvren_render.exe examples/simple_volume.json output.ppm
+```
+
+`examples/simple_volume.json` 提供了一个 2×2×2 的最小体积示例，生成的 `output.ppm` 为 PPM(P6) 格式。命令行工具完全依赖 CPU 路径，可在没有 GPU 的环境下验证主流程。
+
+---
+
 ## 1. 设计目标
 
 * Simple in, simple out: 单一最小 API，显式与隐式场共享同一渲染/求导接口。

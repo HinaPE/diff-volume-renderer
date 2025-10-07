@@ -43,7 +43,22 @@ jobs:
           nvcc --version
 
       - name: Configure with CMake
-        run: cmake -B build -S . -G Ninja -DCMAKE_BUILD_TYPE=Release
+        run: >
+          cmake -B build -S .
+          -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DDVREN_ENABLE_CUDA=OFF
+          -DDVREN_BUILD_PROJECT_TESTS=ON
+          -DDVREN_ENABLE_HOTPATH_TESTS=OFF
 
-      - name: Build
-        run: cmake --build build
+      - name: Build Core Targets
+        run: cmake --build build --target dvren_core_tests hp_runner
+
+      - name: Run Unit Tests
+        run: ctest --output-on-failure
+        working-directory: build
+
+      - name: Run Hotpath Gates
+        run: |
+          ./build/hotpath/hp_runner > hp_scoreboard.log
+          python3 hotpath/scripts/ci_check.py hp_scoreboard.log

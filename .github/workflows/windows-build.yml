@@ -33,8 +33,27 @@ jobs:
       - name: Configure with CMake
         shell: pwsh
         run: |
-          cmake -B build -S . -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl
+          cmake -B build -S . -G Ninja `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_C_COMPILER=cl `
+            -DCMAKE_CXX_COMPILER=cl `
+            -DDVREN_ENABLE_CUDA=OFF `
+            -DDVREN_BUILD_PROJECT_TESTS=ON `
+            -DDVREN_ENABLE_HOTPATH_TESTS=OFF
 
-      - name: Build
-        run: cmake --build build --config Release
+      - name: Build Core Targets
         shell: pwsh
+        run: |
+          cmake --build build --config Release --target dvren_core_tests
+          cmake --build build --config Release --target hp_runner
+
+      - name: Run Unit Tests
+        shell: pwsh
+        run: ctest --output-on-failure -C Release
+        working-directory: build
+
+      - name: Run Hotpath Gates
+        shell: pwsh
+        run: |
+          .\build\hotpath\Release\hp_runner.exe *> hp_scoreboard.log
+          python hotpath/scripts/ci_check.py hp_scoreboard.log
