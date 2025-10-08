@@ -79,4 +79,16 @@ if (DVREN_BUILD_PROJECT_TESTS)
     )
     target_link_libraries(dvren_core_tests PRIVATE dvren::render)
     add_test(NAME dvren_core_tests COMMAND dvren_core_tests)
+
+    add_executable(dvren_smoke_forward
+        tests/render/test_smoke_forward.cpp
+    )
+    target_link_libraries(dvren_smoke_forward PRIVATE dvren::render)
+    add_test(NAME dvren_smoke_forward COMMAND dvren_smoke_forward)
+
+    add_executable(dvren_smoke_forward_highres
+        tests/render/test_smoke_forward_highres.cpp
+    )
+    target_link_libraries(dvren_smoke_forward_highres PRIVATE dvren::render)
+    add_test(NAME dvren_smoke_forward_highres COMMAND dvren_smoke_forward_highres)
 endif ()
