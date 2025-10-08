@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <numeric>
 #include <vector>
 
 #include "dvren/fields/dense_grid.hpp"
@@ -13,6 +14,34 @@
 namespace smoke_test {
 
 constexpr float kStopThreshold = 1e-4f;
+
+struct FieldStats {
+    float min{0.0f};
+    float max{0.0f};
+    float mean{0.0f};
+    float stddev{0.0f};
+};
+
+inline FieldStats ComputeStats(const std::vector<float>& data) {
+    if (data.empty()) {
+        return FieldStats{};
+    }
+    const auto [min_it, max_it] = std::minmax_element(data.begin(), data.end());
+    const double sum = std::accumulate(data.begin(), data.end(), 0.0);
+    const double mean = sum / static_cast<double>(data.size());
+    double variance = 0.0;
+    for (float value : data) {
+        const double diff = static_cast<double>(value) - mean;
+        variance += diff * diff;
+    }
+    variance /= static_cast<double>(data.size());
+    return FieldStats{
+        *min_it,
+        *max_it,
+        static_cast<float>(mean),
+        static_cast<float>(std::sqrt(std::max(variance, 0.0)))
+    };
+}
 
 inline float ComputeAlpha(float sigma, float dt) {
     const float optical_depth = sigma * dt;
@@ -330,4 +359,3 @@ inline void PopulateSmokeGrid(dvren::DenseGridConfig& config) {
 }
 
 }  // namespace smoke_test
-

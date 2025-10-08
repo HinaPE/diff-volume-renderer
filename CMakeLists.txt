@@ -91,4 +91,10 @@ if (DVREN_BUILD_PROJECT_TESTS)
     )
     target_link_libraries(dvren_smoke_forward_highres PRIVATE dvren::render)
     add_test(NAME dvren_smoke_forward_highres COMMAND dvren_smoke_forward_highres)
+
+    add_executable(dvren_smoke_animation
+        tests/render/test_smoke_animation.cpp
+    )
+    target_link_libraries(dvren_smoke_animation PRIVATE dvren::render)
+    add_test(NAME dvren_smoke_animation COMMAND dvren_smoke_animation)
 endif ()

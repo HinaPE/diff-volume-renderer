@@ -30,34 +30,6 @@ float MaxAbsDiff(const std::array<float, 3>& a, const std::array<float, 3>& b) {
     return max_diff;
 }
 
-struct Stats {
-    float min;
-    float max;
-    float mean;
-    float stddev;
-};
-
-Stats ComputeStats(const std::vector<float>& data) {
-    if (data.empty()) {
-        return Stats{0.0f, 0.0f, 0.0f, 0.0f};
-    }
-    const auto [min_it, max_it] = std::minmax_element(data.begin(), data.end());
-    const double sum = std::accumulate(data.begin(), data.end(), 0.0);
-    const double mean = sum / static_cast<double>(data.size());
-    double variance = 0.0;
-    for (float value : data) {
-        const double diff = static_cast<double>(value) - mean;
-        variance += diff * diff;
-    }
-    variance /= static_cast<double>(data.size());
-    return Stats{
-        *min_it,
-        *max_it,
-        static_cast<float>(mean),
-        static_cast<float>(std::sqrt(std::max(variance, 0.0)))
-    };
-}
-
 }  // namespace
 
 int main() {
@@ -179,10 +151,10 @@ int main() {
         }
     }
 
-    const Stats image_stats = ComputeStats(forward.image);
-    const Stats trans_stats = ComputeStats(forward.transmittance);
-    const Stats opacity_stats = ComputeStats(forward.opacity);
-    const Stats depth_stats = ComputeStats(forward.depth);
+    const smoke_test::FieldStats image_stats = smoke_test::ComputeStats(forward.image);
+    const smoke_test::FieldStats trans_stats = smoke_test::ComputeStats(forward.transmittance);
+    const smoke_test::FieldStats opacity_stats = smoke_test::ComputeStats(forward.opacity);
+    const smoke_test::FieldStats depth_stats = smoke_test::ComputeStats(forward.depth);
 
     const size_t active_pixels = std::count_if(forward.hitmask.begin(),
                                                forward.hitmask.end(),
