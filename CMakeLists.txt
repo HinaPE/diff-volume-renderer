@@ -69,7 +69,6 @@ if (DVREN_BUILD_APPS)
     add_executable(dvren_render
         apps/dvren_render/main.cpp
     )
-    target_include_directories(dvren_render PRIVATE third_party)
     target_link_libraries(dvren_render PRIVATE dvren::render)
 endif ()
 
