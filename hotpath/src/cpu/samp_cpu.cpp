@@ -9,6 +9,13 @@
 #include <cstring>
 #include <limits>
 
+#if defined(HP_WITH_CUDA)
+#include <cuda_runtime_api.h>
+#include <vector>
+#endif
+
+#if defined(HP_WITH_CUDA)
+
 namespace {
 
 uint64_t mix_seed(uint64_t state) {
@@ -305,15 +312,239 @@ hp_status samp_generate_cpu(const hp_plan* plan,
     return HP_STATUS_SUCCESS;
 }
 
-#if defined(HP_WITH_CUDA)
-hp_status samp_generate_cuda(const hp_plan*,
-                             const hp_field*,
-                             const hp_field*,
-                             const hp_rays_t*,
-                             hp_samp_t*,
-                             void*,
-                             size_t) {
-    return HP_STATUS_NOT_IMPLEMENTED;
+namespace {
+
+struct DeviceSampBuffers {
+    float* positions{nullptr};
+    float* dt{nullptr};
+    uint32_t* offsets{nullptr};
+    float* sigma{nullptr};
+    float* color{nullptr};
+};
+
+hp_status ensure_sample_buffers_device(hp_samp_t* samp,
+                                       size_t ray_count,
+                                       size_t capacity,
+                                       void* ws,
+                                       size_t ws_bytes,
+                                       DeviceSampBuffers& buffers) {
+    const int64_t sample_capacity_i64 = static_cast<int64_t>(capacity);
+    const int64_t ray_offset_len = static_cast<int64_t>(ray_count + 1);
+
+    samp->positions.dtype = HP_DTYPE_F32;
+    samp->positions.memspace = HP_MEMSPACE_DEVICE;
+    samp->positions.rank = 2;
+    samp->positions.shape[0] = sample_capacity_i64;
+    samp->positions.shape[1] = 3;
+    samp->positions.stride[1] = 1;
+    samp->positions.stride[0] = 3;
+
+    samp->dt.dtype = HP_DTYPE_F32;
+    samp->dt.memspace = HP_MEMSPACE_DEVICE;
+    samp->dt.rank = 1;
+    samp->dt.shape[0] = sample_capacity_i64;
+    samp->dt.stride[0] = 1;
+
+    samp->sigma.dtype = HP_DTYPE_F32;
+    samp->sigma.memspace = HP_MEMSPACE_DEVICE;
+    samp->sigma.rank = 1;
+    samp->sigma.shape[0] = sample_capacity_i64;
+    samp->sigma.stride[0] = 1;
+
+    samp->color.dtype = HP_DTYPE_F32;
+    samp->color.memspace = HP_MEMSPACE_DEVICE;
+    samp->color.rank = 2;
+    samp->color.shape[0] = sample_capacity_i64;
+    samp->color.shape[1] = 3;
+    samp->color.stride[1] = 1;
+    samp->color.stride[0] = 3;
+
+    samp->ray_offset.dtype = HP_DTYPE_U32;
+    samp->ray_offset.memspace = HP_MEMSPACE_DEVICE;
+    samp->ray_offset.rank = 1;
+    samp->ray_offset.shape[0] = ray_offset_len;
+    samp->ray_offset.stride[0] = 1;
+
+    const size_t vec3_bytes = capacity * 3U * sizeof(float);
+    const size_t scalar_bytes = capacity * sizeof(float);
+    const size_t color_bytes = capacity * 3U * sizeof(float);
+    const size_t offsets_bytes = (ray_count + 1) * sizeof(uint32_t);
+
+    hp_workspace_allocator allocator(ws, ws_bytes);
+
+    if (capacity > 0) {
+        if (samp->positions.data == nullptr) {
+            samp->positions.data = allocator.allocate(vec3_bytes, alignof(float));
+        }
+        if (samp->dt.data == nullptr) {
+            samp->dt.data = allocator.allocate(scalar_bytes, alignof(float));
+        }
+        if (samp->sigma.data == nullptr) {
+            samp->sigma.data = allocator.allocate(scalar_bytes, alignof(float));
+        }
+        if (samp->color.data == nullptr) {
+            samp->color.data = allocator.allocate(color_bytes, alignof(float));
+        }
+        if ((vec3_bytes > 0 && samp->positions.data == nullptr) ||
+            (scalar_bytes > 0 && (samp->dt.data == nullptr || samp->sigma.data == nullptr)) ||
+            (color_bytes > 0 && samp->color.data == nullptr)) {
+            return HP_STATUS_OUT_OF_MEMORY;
+        }
+    }
+
+    if (ray_count + 1 > 0) {
+        if (samp->ray_offset.data == nullptr) {
+            samp->ray_offset.data = allocator.allocate(offsets_bytes, alignof(uint32_t));
+        }
+        if (offsets_bytes > 0 && samp->ray_offset.data == nullptr) {
+            return HP_STATUS_OUT_OF_MEMORY;
+        }
+    }
+
+    buffers.positions = static_cast<float*>(samp->positions.data);
+    buffers.dt = static_cast<float*>(samp->dt.data);
+    buffers.sigma = static_cast<float*>(samp->sigma.data);
+    buffers.color = static_cast<float*>(samp->color.data);
+    buffers.offsets = static_cast<uint32_t*>(samp->ray_offset.data);
+    return HP_STATUS_SUCCESS;
+}
+
+bool tensor_is_device_f32_vec3(const hp_tensor& tensor) {
+    return tensor.memspace == HP_MEMSPACE_DEVICE &&
+           tensor.dtype == HP_DTYPE_F32 &&
+           tensor.rank >= 2 &&
+           tensor.shape[1] == 3;
+}
+
+bool tensor_is_device_f32_vec1(const hp_tensor& tensor) {
+    return tensor.memspace == HP_MEMSPACE_DEVICE &&
+           tensor.dtype == HP_DTYPE_F32 &&
+           tensor.rank >= 1;
+}
+
+bool tensor_is_device_u32_vec1(const hp_tensor& tensor) {
+    return tensor.memspace == HP_MEMSPACE_DEVICE &&
+           tensor.dtype == HP_DTYPE_U32 &&
+           tensor.rank >= 1;
+}
+
+}  // namespace
+
+hp_status samp_generate_cuda(const hp_plan* plan,
+                             const hp_field* fs,
+                             const hp_field* fc,
+                             const hp_rays_t* rays,
+                             hp_samp_t* samp,
+                             void* ws,
+                             size_t ws_bytes) {
+    if (plan == nullptr || samp == nullptr || rays == nullptr) {
+        return HP_STATUS_INVALID_ARGUMENT;
+    }
+    if (fs == nullptr && fc == nullptr) {
+        return HP_STATUS_INVALID_ARGUMENT;
+    }
+    if (!tensor_is_device_f32_vec3(rays->origins) ||
+        !tensor_is_device_f32_vec3(rays->directions) ||
+        !tensor_is_device_f32_vec1(rays->t_near) ||
+        !tensor_is_device_f32_vec1(rays->t_far)) {
+        return HP_STATUS_INVALID_ARGUMENT;
+    }
+
+    const size_t ray_count = infer_ray_count(rays, plan->desc);
+    if (ray_count > plan->desc.max_rays) {
+        return HP_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t capacity = static_cast<size_t>(plan->desc.max_samples);
+    if (capacity == 0U && ray_count > 0) {
+        return HP_STATUS_INVALID_ARGUMENT;
+    }
+
+    DeviceSampBuffers device_buffers{};
+    const hp_status device_status = ensure_sample_buffers_device(samp, ray_count, capacity, ws, ws_bytes, device_buffers);
+    if (device_status != HP_STATUS_SUCCESS) {
+        return device_status;
+    }
+
+    // Stage rays on host
+    std::vector<float> h_origins(ray_count * 3U, 0.0f);
+    std::vector<float> h_dirs(ray_count * 3U, 0.0f);
+    std::vector<float> h_t_near(ray_count, 0.0f);
+    std::vector<float> h_t_far(ray_count, 0.0f);
+
+    if (ray_count > 0) {
+        if (cudaMemcpy(h_origins.data(), rays->origins.data, h_origins.size() * sizeof(float), cudaMemcpyDeviceToHost) != cudaSuccess ||
+            cudaMemcpy(h_dirs.data(), rays->directions.data, h_dirs.size() * sizeof(float), cudaMemcpyDeviceToHost) != cudaSuccess ||
+            cudaMemcpy(h_t_near.data(), rays->t_near.data, h_t_near.size() * sizeof(float), cudaMemcpyDeviceToHost) != cudaSuccess ||
+            cudaMemcpy(h_t_far.data(), rays->t_far.data, h_t_far.size() * sizeof(float), cudaMemcpyDeviceToHost) != cudaSuccess) {
+            return HP_STATUS_INTERNAL_ERROR;
+        }
+    }
+
+    hp_rays_t host_rays{};
+    host_rays.origins.data = h_origins.data();
+    host_rays.origins.dtype = HP_DTYPE_F32;
+    host_rays.origins.memspace = HP_MEMSPACE_HOST;
+    host_rays.origins.rank = 2;
+    host_rays.origins.shape[0] = static_cast<int64_t>(ray_count);
+    host_rays.origins.shape[1] = 3;
+    host_rays.origins.stride[1] = 1;
+    host_rays.origins.stride[0] = 3;
+
+    host_rays.directions = host_rays.origins;
+    host_rays.directions.data = h_dirs.data();
+
+    host_rays.t_near.data = h_t_near.data();
+    host_rays.t_near.dtype = HP_DTYPE_F32;
+    host_rays.t_near.memspace = HP_MEMSPACE_HOST;
+    host_rays.t_near.rank = 1;
+    host_rays.t_near.shape[0] = static_cast<int64_t>(ray_count);
+    host_rays.t_near.stride[0] = 1;
+
+    host_rays.t_far = host_rays.t_near;
+    host_rays.t_far.data = h_t_far.data();
+
+    std::vector<std::byte> host_ws;
+    const size_t vec3_bytes = capacity * 3U * sizeof(float);
+    const size_t scalar_bytes = capacity * sizeof(float);
+    const size_t color_bytes = capacity * 3U * sizeof(float);
+    const size_t offsets_bytes = (ray_count + 1) * sizeof(uint32_t);
+    const size_t host_ws_bytes = vec3_bytes + scalar_bytes * 2 + color_bytes + offsets_bytes + 128;
+    host_ws.resize(host_ws_bytes);
+
+    hp_samp_t host_samp{};
+    const hp_status cpu_status = samp_generate_cpu(plan, fs, fc, &host_rays, &host_samp, host_ws.data(), host_ws.size());
+    if (cpu_status != HP_STATUS_SUCCESS) {
+        return cpu_status;
+    }
+
+    const size_t sample_count = (host_samp.dt.rank >= 1) ? static_cast<size_t>(host_samp.dt.shape[0]) : 0;
+    const size_t copy_vec_bytes = sample_count * 3U * sizeof(float);
+    const size_t copy_scalar_bytes = sample_count * sizeof(float);
+    const size_t copy_color_bytes = sample_count * 3U * sizeof(float);
+    const size_t copy_offsets_bytes = (ray_count + 1) * sizeof(uint32_t);
+
+    if (sample_count > 0) {
+        if ((copy_vec_bytes > 0 && cudaMemcpy(device_buffers.positions, host_samp.positions.data, copy_vec_bytes, cudaMemcpyHostToDevice) != cudaSuccess) ||
+            (copy_scalar_bytes > 0 && cudaMemcpy(device_buffers.dt, host_samp.dt.data, copy_scalar_bytes, cudaMemcpyHostToDevice) != cudaSuccess) ||
+            (copy_scalar_bytes > 0 && cudaMemcpy(device_buffers.sigma, host_samp.sigma.data, copy_scalar_bytes, cudaMemcpyHostToDevice) != cudaSuccess) ||
+            (copy_color_bytes > 0 && cudaMemcpy(device_buffers.color, host_samp.color.data, copy_color_bytes, cudaMemcpyHostToDevice) != cudaSuccess)) {
+            return HP_STATUS_INTERNAL_ERROR;
+        }
+    }
+
+    if (ray_count + 1 > 0) {
+        if (cudaMemcpy(device_buffers.offsets, host_samp.ray_offset.data, copy_offsets_bytes, cudaMemcpyHostToDevice) != cudaSuccess) {
+            return HP_STATUS_INTERNAL_ERROR;
+        }
+    }
+
+    samp->positions.shape[0] = static_cast<int64_t>(sample_count);
+    samp->dt.shape[0] = static_cast<int64_t>(sample_count);
+    samp->sigma.shape[0] = static_cast<int64_t>(sample_count);
+    samp->color.shape[0] = static_cast<int64_t>(sample_count);
+    samp->ray_offset.shape[0] = static_cast<int64_t>(ray_count + 1);
+
+    return HP_STATUS_SUCCESS;
 }
 #endif
 

@@ -197,17 +197,4 @@ hp_status diff_generate_cpu(const hp_plan* plan,
     return HP_STATUS_SUCCESS;
 }
 
-#if defined(HP_WITH_CUDA)
-hp_status diff_generate_cuda(const hp_plan*,
-                             const hp_tensor*,
-                             const hp_samp_t*,
-                             const hp_intl_t*,
-                             const hp_rays_t*,
-                             hp_grads_t*,
-                             void*,
-                             size_t) {
-    return HP_STATUS_NOT_IMPLEMENTED;
-}
-#endif
-
 }  // namespace hp_internal

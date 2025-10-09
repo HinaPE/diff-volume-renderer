@@ -19,7 +19,7 @@
 #include <vector>
 
 #if defined(HP_WITH_CUDA)
-#include <cuda_runtime.h>
+#include <cuda_runtime_api.h>
 #endif
 
 namespace {
@@ -1960,7 +1960,6 @@ CaseResult test_diff_cpu_sigma_color(hp_ctx* ctx) {
 
 CaseResult test_img_cpu_roi_background(hp_ctx* ctx) {
     CaseResult result{"img_cpu_roi_background", TestStatus::pass, ""};
-    // Simple stub test - validates ROI and background behavior
     hp_plan_desc plan_desc = make_basic_plan_desc(4, 4, 0.0f, 1.0f);
     plan_desc.roi.x = 1;
     plan_desc.roi.y = 1;
@@ -1976,32 +1975,634 @@ CaseResult test_img_cpu_roi_background(hp_ctx* ctx) {
         return result;
     }
 
+    const size_t ray_count = static_cast<size_t>(plan_desc.roi.width) * static_cast<size_t>(plan_desc.roi.height);
+    std::array<std::byte, 4096> ray_ws{};
+    hp_rays_t rays{};
+    status = hp_ray(plan, nullptr, &rays, ray_ws.data(), ray_ws.size());
+    if (status != HP_STATUS_SUCCESS) {
+        result.status = TestStatus::fail;
+        result.message = std::string("hp_ray failed: ") + status_to_cstr(status);
+        hp_plan_release(plan);
+        return result;
+    }
+
+    std::vector<float> radiance(ray_count * 3U, 0.0f);
+    std::vector<float> trans(ray_count, 0.0f);
+    std::vector<float> opacity(ray_count, 0.0f);
+    std::vector<float> depth(ray_count, 0.0f);
+    for (size_t i = 0; i < ray_count; ++i) {
+        const float scale = static_cast<float>(i + 1);
+        radiance[i * 3U + 0] = 0.1f * scale;
+        radiance[i * 3U + 1] = 0.2f * scale;
+        radiance[i * 3U + 2] = 0.3f * scale;
+        trans[i] = 0.8f - 0.05f * static_cast<float>(i);
+        opacity[i] = 1.0f - trans[i];
+        depth[i] = plan_desc.t_near + 0.1f * scale;
+    }
+
+    hp_intl_t intl{};
+    intl.radiance = make_tensor(radiance.data(), HP_DTYPE_F32, {static_cast<int64_t>(ray_count), 3});
+    intl.transmittance = make_tensor(trans.data(), HP_DTYPE_F32, {static_cast<int64_t>(ray_count)});
+    intl.opacity = make_tensor(opacity.data(), HP_DTYPE_F32, {static_cast<int64_t>(ray_count)});
+    intl.depth = make_tensor(depth.data(), HP_DTYPE_F32, {static_cast<int64_t>(ray_count)});
+
+    std::vector<std::byte> img_ws(4096);
+    hp_img_t img{};
+    status = hp_img(plan, &intl, &rays, &img, img_ws.data(), img_ws.size());
+    if (status != HP_STATUS_SUCCESS) {
+        result.status = TestStatus::fail;
+        result.message = std::string("hp_img failed: ") + status_to_cstr(status);
+        hp_plan_release(plan);
+        return result;
+    }
+
+    const float* image_ptr = static_cast<const float*>(img.image.data);
+    const float* trans_ptr = static_cast<const float*>(img.trans.data);
+    const float* opacity_ptr = static_cast<const float*>(img.opacity.data);
+    const float* depth_ptr = static_cast<const float*>(img.depth.data);
+    const uint32_t* hitmask_ptr = static_cast<const uint32_t*>(img.hitmask.data);
+
+    const float tolerance = 1e-5f;
+    const auto pixel_index = [&](uint32_t px, uint32_t py) -> size_t {
+        return static_cast<size_t>(py) * plan_desc.width + px;
+    };
+    const float depth_background = plan_desc.t_far;
+
+    for (uint32_t local_y = 0; local_y < plan_desc.roi.height; ++local_y) {
+        for (uint32_t local_x = 0; local_x < plan_desc.roi.width; ++local_x) {
+            const size_t ray_idx = static_cast<size_t>(local_y) * plan_desc.roi.width + local_x;
+            const uint32_t px = plan_desc.roi.x + local_x;
+            const uint32_t py = plan_desc.roi.y + local_y;
+            const size_t pixel = pixel_index(px, py);
+            const size_t base = pixel * 3U;
+
+            if (std::fabs(image_ptr[base + 0] - radiance[ray_idx * 3U + 0]) > tolerance ||
+                std::fabs(image_ptr[base + 1] - radiance[ray_idx * 3U + 1]) > tolerance ||
+                std::fabs(image_ptr[base + 2] - radiance[ray_idx * 3U + 2]) > tolerance) {
+                result.status = TestStatus::fail;
+                result.message = "roi color mismatch";
+                hp_plan_release(plan);
+                return result;
+            }
+
+            if (std::fabs(trans_ptr[pixel] - trans[ray_idx]) > tolerance ||
+                std::fabs(opacity_ptr[pixel] - opacity[ray_idx]) > tolerance ||
+                std::fabs(depth_ptr[pixel] - depth[ray_idx]) > tolerance) {
+                result.status = TestStatus::fail;
+                result.message = "roi scalar mismatch";
+                hp_plan_release(plan);
+                return result;
+            }
+
+            if (hitmask_ptr[pixel] != 1U) {
+                result.status = TestStatus::fail;
+                result.message = "roi hitmask mismatch";
+                hp_plan_release(plan);
+                return result;
+            }
+        }
+    }
+
+    for (uint32_t py = 0; py < plan_desc.height; ++py) {
+        for (uint32_t px = 0; px < plan_desc.width; ++px) {
+            const bool in_roi = (px >= plan_desc.roi.x && px < plan_desc.roi.x + plan_desc.roi.width &&
+                                 py >= plan_desc.roi.y && py < plan_desc.roi.y + plan_desc.roi.height);
+            if (in_roi) {
+                continue;
+            }
+            const size_t pixel = pixel_index(px, py);
+            const size_t base = pixel * 3U;
+            if (std::fabs(image_ptr[base + 0]) > tolerance ||
+                std::fabs(image_ptr[base + 1]) > tolerance ||
+                std::fabs(image_ptr[base + 2]) > tolerance) {
+                result.status = TestStatus::fail;
+                result.message = "background color not zero";
+                hp_plan_release(plan);
+                return result;
+            }
+            if (std::fabs(trans_ptr[pixel] - 1.0f) > tolerance ||
+                std::fabs(opacity_ptr[pixel]) > tolerance ||
+                std::fabs(depth_ptr[pixel] - depth_background) > tolerance) {
+                result.status = TestStatus::fail;
+                result.message = "background scalar mismatch";
+                hp_plan_release(plan);
+                return result;
+            }
+            if (hitmask_ptr[pixel] != 0U) {
+                result.status = TestStatus::fail;
+                result.message = "background hitmask not zero";
+                hp_plan_release(plan);
+                return result;
+            }
+        }
+    }
+
     hp_plan_release(plan);
     return result;
 }
 
 CaseResult test_hash_mlp_cpu_basic(hp_ctx* ctx) {
     CaseResult result{"hash_mlp_cpu_basic", TestStatus::pass, ""};
-    // Stub test for hash MLP
-    result.status = TestStatus::skip;
-    result.message = "hash_mlp not fully implemented yet";
+    constexpr uint32_t n_levels = 4;
+    constexpr uint32_t features_per_level = 2;
+    constexpr uint32_t table_size = 16;
+    constexpr uint32_t hidden_dim = 8;
+    const size_t encoding_dim = static_cast<size_t>(n_levels) * features_per_level;
+    const size_t hash_table_size = static_cast<size_t>(n_levels) * table_size * features_per_level;
+    const size_t sigma_weights_size = hidden_dim * encoding_dim + hidden_dim;
+    const size_t sigma_biases_size = hidden_dim + 1;
+    const size_t color_weights_size = hidden_dim * encoding_dim + 3U * hidden_dim;
+    const size_t color_biases_size = hidden_dim + 3;
+    const size_t total_size = hash_table_size + sigma_weights_size + sigma_biases_size +
+                              color_weights_size + color_biases_size;
+
+    std::vector<float> params(total_size, 0.0f);
+    const size_t sigma_bias_offset = hash_table_size + sigma_weights_size;
+    params[sigma_bias_offset + hidden_dim] = 0.5f;
+
+    const size_t color_bias_offset = sigma_bias_offset + sigma_biases_size + color_weights_size;
+    params[color_bias_offset + hidden_dim + 0] = 0.2f;
+    params[color_bias_offset + hidden_dim + 1] = 0.4f;
+    params[color_bias_offset + hidden_dim + 2] = 0.6f;
+
+    hp_tensor params_tensor = make_tensor(params.data(), HP_DTYPE_F32, {static_cast<int64_t>(params.size())});
+
+    hp_field* fs = nullptr;
+    hp_field* fc = nullptr;
+    hp_status status = hp_field_create_hash_mlp(ctx, &params_tensor, &fs);
+    if (status != HP_STATUS_SUCCESS) {
+        result.status = TestStatus::fail;
+        result.message = "hp_field_create_hash_mlp sigma failed";
+        return result;
+    }
+    status = hp_field_create_hash_mlp(ctx, &params_tensor, &fc);
+    if (status != HP_STATUS_SUCCESS) {
+        result.status = TestStatus::fail;
+        result.message = "hp_field_create_hash_mlp color failed";
+        hp_field_release(fs);
+        return result;
+    }
+
+    hp_plan_desc plan_desc = make_basic_plan_desc(1, 1, 0.0f, 1.0f);
+    plan_desc.max_rays = 1;
+    plan_desc.max_samples = 4;
+    plan_desc.sampling.dt = 0.25f;
+    plan_desc.sampling.max_steps = 4;
+
+    hp_plan* plan = nullptr;
+    status = hp_plan_create(ctx, &plan_desc, &plan);
+    if (status != HP_STATUS_SUCCESS) {
+        result.status = TestStatus::fail;
+        result.message = "hp_plan_create failed";
+        hp_field_release(fs);
+        hp_field_release(fc);
+        return result;
+    }
+
+    std::array<std::byte, 1024> ray_ws{};
+    hp_rays_t rays{};
+    status = hp_ray(plan, nullptr, &rays, ray_ws.data(), ray_ws.size());
+    if (status != HP_STATUS_SUCCESS) {
+        result.status = TestStatus::fail;
+        result.message = "hp_ray failed";
+        hp_field_release(fs);
+        hp_field_release(fc);
+        hp_plan_release(plan);
+        return result;
+    }
+
+    std::vector<std::byte> samp_ws(4096);
+    hp_samp_t samp{};
+    status = hp_samp(plan, fs, fc, &rays, &samp, samp_ws.data(), samp_ws.size());
+    if (status != HP_STATUS_SUCCESS) {
+        result.status = TestStatus::fail;
+        result.message = "hp_samp failed";
+        hp_field_release(fs);
+        hp_field_release(fc);
+        hp_plan_release(plan);
+        return result;
+    }
+
+    const size_t sample_count = (samp.dt.rank >= 1) ? static_cast<size_t>(samp.dt.shape[0]) : 0;
+    if (sample_count == 0) {
+        result.status = TestStatus::fail;
+        result.message = "no samples generated";
+        hp_field_release(fs);
+        hp_field_release(fc);
+        hp_plan_release(plan);
+        return result;
+    }
+
+    const float* sigma_ptr = static_cast<const float*>(samp.sigma.data);
+    const float* color_ptr = static_cast<const float*>(samp.color.data);
+    const float expected_color[3]{0.2f, 0.4f, 0.6f};
+    for (size_t i = 0; i < sample_count; ++i) {
+        if (std::fabs(sigma_ptr[i] - 0.5f) > 1e-5f) {
+            result.status = TestStatus::fail;
+            result.message = "sigma value mismatch";
+            hp_field_release(fs);
+            hp_field_release(fc);
+            hp_plan_release(plan);
+            return result;
+        }
+        for (int c = 0; c < 3; ++c) {
+            if (std::fabs(color_ptr[i * 3U + c] - expected_color[c]) > 1e-5f) {
+                result.status = TestStatus::fail;
+                result.message = "color value mismatch";
+                hp_field_release(fs);
+                hp_field_release(fc);
+                hp_plan_release(plan);
+                return result;
+            }
+        }
+    }
+
+    hp_field_release(fs);
+    hp_field_release(fc);
+    hp_plan_release(plan);
     return result;
 }
 
 CaseResult test_hash_mlp_cpu_determinism(hp_ctx* ctx) {
     CaseResult result{"hash_mlp_cpu_determinism", TestStatus::pass, ""};
-    // Stub test for hash MLP determinism
-    result.status = TestStatus::skip;
-    result.message = "hash_mlp not fully implemented yet";
+    constexpr uint32_t n_levels = 4;
+    constexpr uint32_t features_per_level = 2;
+    constexpr uint32_t table_size = 16;
+    constexpr uint32_t hidden_dim = 8;
+    const size_t encoding_dim = static_cast<size_t>(n_levels) * features_per_level;
+    const size_t hash_table_size = static_cast<size_t>(n_levels) * table_size * features_per_level;
+    const size_t sigma_weights_size = hidden_dim * encoding_dim + hidden_dim;
+    const size_t sigma_biases_size = hidden_dim + 1;
+    const size_t color_weights_size = hidden_dim * encoding_dim + 3U * hidden_dim;
+    const size_t color_biases_size = hidden_dim + 3;
+    const size_t total_size = hash_table_size + sigma_weights_size + sigma_biases_size +
+                              color_weights_size + color_biases_size;
+
+    std::vector<float> params(total_size, 0.0f);
+    const size_t sigma_bias_offset = hash_table_size + sigma_weights_size;
+    params[sigma_bias_offset + hidden_dim] = 0.25f;
+
+    const size_t color_bias_offset = sigma_bias_offset + sigma_biases_size + color_weights_size;
+    params[color_bias_offset + hidden_dim + 0] = 0.3f;
+    params[color_bias_offset + hidden_dim + 1] = 0.1f;
+    params[color_bias_offset + hidden_dim + 2] = 0.5f;
+
+    hp_tensor params_tensor = make_tensor(params.data(), HP_DTYPE_F32, {static_cast<int64_t>(params.size())});
+
+    hp_field* fs = nullptr;
+    hp_field* fc = nullptr;
+    hp_status status = hp_field_create_hash_mlp(ctx, &params_tensor, &fs);
+    if (status != HP_STATUS_SUCCESS) {
+        result.status = TestStatus::fail;
+        result.message = "hp_field_create_hash_mlp sigma failed";
+        return result;
+    }
+    status = hp_field_create_hash_mlp(ctx, &params_tensor, &fc);
+    if (status != HP_STATUS_SUCCESS) {
+        result.status = TestStatus::fail;
+        result.message = "hp_field_create_hash_mlp color failed";
+        hp_field_release(fs);
+        return result;
+    }
+
+    hp_plan_desc plan_desc = make_basic_plan_desc(1, 1, 0.0f, 1.0f);
+    plan_desc.max_rays = 1;
+    plan_desc.max_samples = 3;
+    plan_desc.sampling.dt = 0.3f;
+    plan_desc.sampling.max_steps = 3;
+
+    hp_plan* plan = nullptr;
+    status = hp_plan_create(ctx, &plan_desc, &plan);
+    if (status != HP_STATUS_SUCCESS) {
+        result.status = TestStatus::fail;
+        result.message = "hp_plan_create failed";
+        hp_field_release(fs);
+        hp_field_release(fc);
+        return result;
+    }
+
+    std::array<std::byte, 1024> ray_ws{};
+    hp_rays_t rays{};
+    status = hp_ray(plan, nullptr, &rays, ray_ws.data(), ray_ws.size());
+    if (status != HP_STATUS_SUCCESS) {
+        result.status = TestStatus::fail;
+        result.message = "hp_ray failed";
+        hp_field_release(fs);
+        hp_field_release(fc);
+        hp_plan_release(plan);
+        return result;
+    }
+
+    std::vector<std::byte> samp_ws_a(4096);
+    hp_samp_t samp_a{};
+    status = hp_samp(plan, fs, fc, &rays, &samp_a, samp_ws_a.data(), samp_ws_a.size());
+    if (status != HP_STATUS_SUCCESS) {
+        result.status = TestStatus::fail;
+        result.message = "hp_samp first run failed";
+        hp_field_release(fs);
+        hp_field_release(fc);
+        hp_plan_release(plan);
+        return result;
+    }
+
+    const size_t sample_count = (samp_a.dt.rank >= 1) ? static_cast<size_t>(samp_a.dt.shape[0]) : 0;
+    std::vector<float> sigma_first(sample_count, 0.0f);
+    std::vector<float> color_first(sample_count * 3U, 0.0f);
+    if (sample_count > 0) {
+        std::memcpy(sigma_first.data(), samp_a.sigma.data, sample_count * sizeof(float));
+        std::memcpy(color_first.data(), samp_a.color.data, sample_count * 3U * sizeof(float));
+    }
+
+    std::vector<std::byte> samp_ws_b(4096);
+    hp_samp_t samp_b{};
+    status = hp_samp(plan, fs, fc, &rays, &samp_b, samp_ws_b.data(), samp_ws_b.size());
+    if (status != HP_STATUS_SUCCESS) {
+        result.status = TestStatus::fail;
+        result.message = "hp_samp second run failed";
+        hp_field_release(fs);
+        hp_field_release(fc);
+        hp_plan_release(plan);
+        return result;
+    }
+
+    const size_t sample_count_b = (samp_b.dt.rank >= 1) ? static_cast<size_t>(samp_b.dt.shape[0]) : 0;
+    if (sample_count != sample_count_b) {
+        result.status = TestStatus::fail;
+        result.message = "sample count mismatch between runs";
+        hp_field_release(fs);
+        hp_field_release(fc);
+        hp_plan_release(plan);
+        return result;
+    }
+
+    std::vector<float> sigma_second(sample_count_b, 0.0f);
+    std::vector<float> color_second(sample_count_b * 3U, 0.0f);
+    if (sample_count_b > 0) {
+        std::memcpy(sigma_second.data(), samp_b.sigma.data, sample_count_b * sizeof(float));
+        std::memcpy(color_second.data(), samp_b.color.data, sample_count_b * 3U * sizeof(float));
+    }
+
+    for (size_t i = 0; i < sample_count; ++i) {
+        if (std::fabs(sigma_first[i] - sigma_second[i]) > 1e-6f) {
+            result.status = TestStatus::fail;
+            result.message = "sigma determinism mismatch";
+            hp_field_release(fs);
+            hp_field_release(fc);
+            hp_plan_release(plan);
+            return result;
+        }
+        for (int c = 0; c < 3; ++c) {
+            if (std::fabs(color_first[i * 3U + c] - color_second[i * 3U + c]) > 1e-6f) {
+                result.status = TestStatus::fail;
+                result.message = "color determinism mismatch";
+                hp_field_release(fs);
+                hp_field_release(fc);
+                hp_plan_release(plan);
+                return result;
+            }
+        }
+    }
+
+    hp_field_release(fs);
+    hp_field_release(fc);
+    hp_plan_release(plan);
     return result;
 }
 
 #if defined(HP_WITH_CUDA)
 CaseResult test_diff_cuda_determinism(hp_ctx* ctx) {
     CaseResult result{"diff_cuda_determinism", TestStatus::pass, ""};
-    // Stub test for CUDA diff determinism
-    result.status = TestStatus::skip;
-    result.message = "diff_cuda_determinism test not fully implemented yet";
+    int device_count = 0;
+    if (cudaGetDeviceCount(&device_count) != cudaSuccess || device_count == 0) {
+        result.status = TestStatus::skip;
+        result.message = "no CUDA device available";
+        return result;
+    }
+
+    hp_plan_desc plan_desc = make_basic_plan_desc(1, 1, 0.0f, 1.0f);
+    plan_desc.max_rays = 1;
+    plan_desc.max_samples = 4;
+    plan_desc.sampling.dt = 0.25f;
+    plan_desc.sampling.max_steps = 4;
+
+    hp_plan* plan = nullptr;
+    hp_status status = hp_plan_create(ctx, &plan_desc, &plan);
+    if (status != HP_STATUS_SUCCESS || plan == nullptr) {
+        result.status = TestStatus::fail;
+        result.message = std::string("hp_plan_create failed: ") + status_to_cstr(status);
+        return result;
+    }
+
+    std::array<std::byte, 4096> ray_ws{};
+    hp_rays_t rays{};
+    status = hp_ray(plan, nullptr, &rays, ray_ws.data(), ray_ws.size());
+    if (status != HP_STATUS_SUCCESS) {
+        result.status = TestStatus::fail;
+        result.message = "hp_ray failed";
+        hp_plan_release(plan);
+        return result;
+    }
+
+    std::vector<float> sigma_grid{0.9f, 0.7f, 0.6f, 0.5f};
+    std::vector<float> color_grid{
+        0.3f, 0.2f, 0.1f, 0.5f, 0.4f, 0.3f, 0.6f, 0.2f,
+        0.7f, 0.4f, 0.2f, 0.8f, 0.1f, 0.3f, 0.5f, 0.9f,
+        0.2f, 0.6f, 0.4f, 0.7f, 0.3f, 0.5f, 0.2f, 0.4f
+    };
+
+    hp_tensor sigma_tensor = make_tensor(sigma_grid.data(), HP_DTYPE_F32, {2, 2, 1});
+    hp_tensor color_tensor = make_tensor(color_grid.data(), HP_DTYPE_F32, {2, 2, 2, 3});
+
+    hp_field* fs = nullptr;
+    hp_field* fc = nullptr;
+    status = hp_field_create_grid_sigma(ctx, &sigma_tensor, HP_INTERP_LINEAR, HP_OOB_ZERO, &fs);
+    if (status != HP_STATUS_SUCCESS) {
+        result.status = TestStatus::fail;
+        result.message = "hp_field_create_grid_sigma failed";
+        hp_plan_release(plan);
+        return result;
+    }
+    status = hp_field_create_grid_color(ctx, &color_tensor, HP_INTERP_LINEAR, HP_OOB_ZERO, &fc);
+    if (status != HP_STATUS_SUCCESS) {
+        result.status = TestStatus::fail;
+        result.message = "hp_field_create_grid_color failed";
+        hp_field_release(fs);
+        hp_plan_release(plan);
+        return result;
+    }
+
+    std::array<std::byte, 8192> samp_ws{};
+    hp_samp_t samp_cpu{};
+    status = hp_samp(plan, fs, fc, &rays, &samp_cpu, samp_ws.data(), samp_ws.size());
+    if (status != HP_STATUS_SUCCESS) {
+        result.status = TestStatus::fail;
+        result.message = "hp_samp CPU failed";
+        hp_field_release(fs);
+        hp_field_release(fc);
+        hp_plan_release(plan);
+        return result;
+    }
+
+    std::array<std::byte, 8192> intl_ws{};
+    hp_intl_t intl_cpu{};
+    status = hp_int(plan, &samp_cpu, &intl_cpu, intl_ws.data(), intl_ws.size());
+    if (status != HP_STATUS_SUCCESS) {
+        result.status = TestStatus::fail;
+        result.message = "hp_int CPU failed";
+        hp_field_release(fs);
+        hp_field_release(fc);
+        hp_plan_release(plan);
+        return result;
+    }
+
+    const size_t sample_count = (samp_cpu.dt.rank >= 1) ? static_cast<size_t>(samp_cpu.dt.shape[0]) : 0;
+    const size_t ray_count = (intl_cpu.transmittance.rank >= 1) ? static_cast<size_t>(intl_cpu.transmittance.shape[0]) : 0;
+
+    float* d_dt = nullptr;
+    float* d_sigma = nullptr;
+    float* d_color = nullptr;
+    uint32_t* d_offsets = nullptr;
+    float* d_aux = nullptr;
+    float* d_grad_input = nullptr;
+
+    const size_t dt_bytes = sample_count * sizeof(float);
+    const size_t sigma_bytes = sample_count * sizeof(float);
+    const size_t color_bytes = sample_count * 3U * sizeof(float);
+    const size_t offset_bytes = (ray_count + 1) * sizeof(uint32_t);
+    const size_t aux_bytes = sample_count * 4U * sizeof(float);
+    const size_t grad_input_bytes = ray_count * 3U * sizeof(float);
+
+    if (cudaMalloc(reinterpret_cast<void**>(&d_dt), dt_bytes) != cudaSuccess ||
+        cudaMalloc(reinterpret_cast<void**>(&d_sigma), sigma_bytes) != cudaSuccess ||
+        cudaMalloc(reinterpret_cast<void**>(&d_color), color_bytes) != cudaSuccess ||
+        cudaMalloc(reinterpret_cast<void**>(&d_offsets), offset_bytes) != cudaSuccess ||
+        cudaMalloc(reinterpret_cast<void**>(&d_aux), aux_bytes) != cudaSuccess ||
+        cudaMalloc(reinterpret_cast<void**>(&d_grad_input), grad_input_bytes) != cudaSuccess) {
+        result.status = TestStatus::skip;
+        result.message = "cudaMalloc failed";
+        cudaFree(d_dt);
+        cudaFree(d_sigma);
+        cudaFree(d_color);
+        cudaFree(d_offsets);
+        cudaFree(d_aux);
+        cudaFree(d_grad_input);
+        hp_field_release(fs);
+        hp_field_release(fc);
+        hp_plan_release(plan);
+        return result;
+    }
+
+    cudaMemcpy(d_dt, samp_cpu.dt.data, dt_bytes, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_sigma, samp_cpu.sigma.data, sigma_bytes, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_color, samp_cpu.color.data, color_bytes, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_offsets, samp_cpu.ray_offset.data, offset_bytes, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_aux, intl_cpu.aux.data, aux_bytes, cudaMemcpyHostToDevice);
+
+    std::vector<float> grad_input(ray_count * 3U, 1.0f);
+    cudaMemcpy(d_grad_input, grad_input.data(), grad_input_bytes, cudaMemcpyHostToDevice);
+
+    hp_samp_t samp_cuda{};
+    samp_cuda.dt = make_tensor(d_dt, HP_DTYPE_F32, {static_cast<int64_t>(sample_count)});
+    samp_cuda.dt.memspace = HP_MEMSPACE_DEVICE;
+    samp_cuda.sigma = make_tensor(d_sigma, HP_DTYPE_F32, {static_cast<int64_t>(sample_count)});
+    samp_cuda.sigma.memspace = HP_MEMSPACE_DEVICE;
+    samp_cuda.color = make_tensor(d_color, HP_DTYPE_F32, {static_cast<int64_t>(sample_count), 3});
+    samp_cuda.color.memspace = HP_MEMSPACE_DEVICE;
+    samp_cuda.ray_offset = make_tensor(d_offsets, HP_DTYPE_U32, {static_cast<int64_t>(ray_count + 1)});
+    samp_cuda.ray_offset.memspace = HP_MEMSPACE_DEVICE;
+
+    hp_intl_t intl_cuda{};
+    intl_cuda.aux = make_tensor(d_aux, HP_DTYPE_F32, {static_cast<int64_t>(sample_count), 4});
+    intl_cuda.aux.memspace = HP_MEMSPACE_DEVICE;
+
+    hp_tensor grad_tensor_cuda = make_tensor(d_grad_input, HP_DTYPE_F32, {static_cast<int64_t>(ray_count), 3});
+    grad_tensor_cuda.memspace = HP_MEMSPACE_DEVICE;
+
+    auto run_backward = [&](std::vector<float>& sigma_out, std::vector<float>& color_out) -> bool {
+        hp_grads_t grads_cuda{};
+        hp_status diff_status = hp_diff(plan, &grad_tensor_cuda, &samp_cuda, &intl_cuda, &grads_cuda, nullptr, 0);
+        if (diff_status != HP_STATUS_SUCCESS) {
+            result.status = TestStatus::fail;
+            result.message = std::string("hp_diff CUDA failed: ") + status_to_cstr(diff_status);
+            return false;
+        }
+
+        sigma_out.resize(sample_count);
+        color_out.resize(sample_count * 3U);
+        if ((sigma_bytes > 0 && cudaMemcpy(sigma_out.data(), grads_cuda.sigma.data, sigma_bytes, cudaMemcpyDeviceToHost) != cudaSuccess) ||
+            (color_bytes > 0 && cudaMemcpy(color_out.data(), grads_cuda.color.data, color_bytes, cudaMemcpyDeviceToHost) != cudaSuccess)) {
+            result.status = TestStatus::fail;
+            result.message = "cudaMemcpy grads failed";
+            cudaFree(static_cast<float*>(grads_cuda.sigma.data));
+            cudaFree(static_cast<float*>(grads_cuda.color.data));
+            if (grads_cuda.camera.data) cudaFree(static_cast<float*>(grads_cuda.camera.data));
+            return false;
+        }
+
+        cudaFree(static_cast<float*>(grads_cuda.sigma.data));
+        cudaFree(static_cast<float*>(grads_cuda.color.data));
+        if (grads_cuda.camera.data) {
+            cudaFree(static_cast<float*>(grads_cuda.camera.data));
+        }
+        return true;
+    };
+
+    std::vector<float> sigma_first;
+    std::vector<float> color_first;
+    if (!run_backward(sigma_first, color_first)) {
+        cudaFree(d_dt);
+        cudaFree(d_sigma);
+        cudaFree(d_color);
+        cudaFree(d_offsets);
+        cudaFree(d_aux);
+        cudaFree(d_grad_input);
+        hp_field_release(fs);
+        hp_field_release(fc);
+        hp_plan_release(plan);
+        return result;
+    }
+
+    std::vector<float> sigma_second;
+    std::vector<float> color_second;
+    if (!run_backward(sigma_second, color_second)) {
+        cudaFree(d_dt);
+        cudaFree(d_sigma);
+        cudaFree(d_color);
+        cudaFree(d_offsets);
+        cudaFree(d_aux);
+        cudaFree(d_grad_input);
+        hp_field_release(fs);
+        hp_field_release(fc);
+        hp_plan_release(plan);
+        return result;
+    }
+
+    for (size_t i = 0; i < sigma_first.size(); ++i) {
+        if (std::fabs(sigma_first[i] - sigma_second[i]) > 1e-6f) {
+            result.status = TestStatus::fail;
+            result.message = "sigma gradients not deterministic";
+            break;
+        }
+    }
+    if (result.status == TestStatus::pass) {
+        for (size_t i = 0; i < color_first.size(); ++i) {
+            if (std::fabs(color_first[i] - color_second[i]) > 1e-6f) {
+                result.status = TestStatus::fail;
+                result.message = "color gradients not deterministic";
+                break;
+            }
+        }
+    }
+
+    cudaFree(d_dt);
+    cudaFree(d_sigma);
+    cudaFree(d_color);
+    cudaFree(d_offsets);
+    cudaFree(d_aux);
+    cudaFree(d_grad_input);
+    hp_field_release(fs);
+    hp_field_release(fc);
+    hp_plan_release(plan);
     return result;
 }
 
@@ -2108,12 +2709,12 @@ CaseResult test_diff_cuda_sigma_color(hp_ctx* ctx) {
     const size_t aux_bytes = sample_count * 4U * sizeof(float);
     const size_t grad_input_bytes = ray_count * 3U * sizeof(float);
 
-    if (cudaMalloc(&d_dt, dt_bytes) != cudaSuccess ||
-        cudaMalloc(&d_sigma, sigma_bytes) != cudaSuccess ||
-        cudaMalloc(&d_color, color_bytes) != cudaSuccess ||
-        cudaMalloc(&d_offsets, offset_bytes) != cudaSuccess ||
-        cudaMalloc(&d_aux, aux_bytes) != cudaSuccess ||
-        cudaMalloc(&d_grad_input, grad_input_bytes) != cudaSuccess) {
+    if (cudaMalloc(reinterpret_cast<void**>(&d_dt), dt_bytes) != cudaSuccess ||
+        cudaMalloc(reinterpret_cast<void**>(&d_sigma), sigma_bytes) != cudaSuccess ||
+        cudaMalloc(reinterpret_cast<void**>(&d_color), color_bytes) != cudaSuccess ||
+        cudaMalloc(reinterpret_cast<void**>(&d_offsets), offset_bytes) != cudaSuccess ||
+        cudaMalloc(reinterpret_cast<void**>(&d_aux), aux_bytes) != cudaSuccess ||
+        cudaMalloc(reinterpret_cast<void**>(&d_grad_input), grad_input_bytes) != cudaSuccess) {
         result.status = TestStatus::skip;
         result.message = "cudaMalloc failed";
         cudaFree(d_dt);
